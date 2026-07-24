@@ -169,6 +169,42 @@ export function RoleAvatar(props: { role: 'batman' | 'robin' | 'nightwing' | 'or
   return <PixelSprite rows={s.rows} palette={s.palette} size={props.size ?? 44} className={props.className} />;
 }
 
+// Your chosen hero as a caped bust: the approved head avatar + a role-colored body/emblem.
+// 'c' = cape/suit, 'e' = emblem.
+type HeroRole = 'batman' | 'robin' | 'nightwing' | 'oracle';
+const HERO_BODY: Record<HeroRole, { c: string; e: string }> = {
+  batman: { c: '#23262b', e: '#f5c518' },
+  robin: { c: '#d1354a', e: '#f5c518' },
+  nightwing: { c: '#14161f', e: '#5566ff' },
+  oracle: { c: '#2a2f3a', e: '#2fbf4a' },
+};
+const BODY_ROWS: string[] = [
+  '.....cc.cc.....',
+  '..cccccccccc..',
+  '.cccccccccccc.',
+  '.cccceeeecccc.',
+  '.cccceeeecccc.',
+  '.cccccccccccc.',
+  '.cccccccccccc.',
+];
+
+export type HeroMood = 'idle' | 'cheer' | 'flinch' | 'defeat';
+
+export function HeroMascot(props: { role: HeroRole; mood?: HeroMood; size?: number; className?: string }) {
+  const mood = props.mood ?? 'idle';
+  const head = AVATARS[props.role];
+  const body = HERO_BODY[props.role];
+  // pad head rows (12 wide) to the 14-wide body and stack.
+  const headRows = head.rows.map((r) => `.${r}.`);
+  const rows = [...headRows, ...BODY_ROWS];
+  const palette = { ...head.palette, c: body.c, e: body.e };
+  return (
+    <div className={`hero-mascot hmood-${mood} ${props.className ?? ''}`}>
+      <PixelSprite rows={rows} palette={palette} size={props.size ?? 112} className="hero-mascot-svg" />
+    </div>
+  );
+}
+
 // --- Bats (victory scatter) ---
 const BAT: Sprite = {
   palette: { k: '#0a0a0a' },

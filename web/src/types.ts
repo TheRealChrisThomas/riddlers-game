@@ -65,6 +65,7 @@ export interface EscapeData {
   phase: 'override' | 'hold' | 'open';
   overrideStarted: boolean;
   overrideAttempts: number | null;
+  attempt?: number; // live retry attempt (API-injected)
   holders: Record<string, boolean>;
   operators: string[];
 }

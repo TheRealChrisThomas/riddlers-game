@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { Ambient } from './Ambient';
-import { Riddler, RoleAvatar, VictoryBats, type RiddlerMood } from './pixel';
+import { HeroMascot, Riddler, RoleAvatar, VictoryBats, type HeroMood, type RiddlerMood } from './pixel';
 import {
   ChamberResponse,
   ChamberState,
@@ -279,6 +279,17 @@ function Case(props: { code: string; operator: string; onLeave: () => void }) {
             ? 'cackle'
             : 'idle';
   const mascotMood = moodFlash ?? baseMood;
+  const myHero = shell.roster.find((p) => p.operator === operator)?.role;
+  const heroMood: HeroMood =
+    shell.status === 'escaped'
+      ? 'cheer'
+      : shell.status === 'failed'
+        ? 'defeat'
+        : moodFlash === 'scowl' // a chamber was just cleared
+          ? 'cheer'
+          : chamberData?.kind === 'deathtrap' && chamberData.compensating
+            ? 'flinch'
+            : 'idle';
   const remainingMs = shell.deadlineEpochMs ? shell.deadlineEpochMs - now : Infinity;
   const danger = shell.status === 'in_chamber' && remainingMs < 30_000;
 
@@ -290,6 +301,11 @@ function Case(props: { code: string; operator: string; onLeave: () => void }) {
       <div className="mascot">
         <Riddler mood={mascotMood} size={112} />
       </div>
+      {myHero && (
+        <div className="mascot mascot-right">
+          <HeroMascot role={myHero} mood={heroMood} size={112} />
+        </div>
+      )}
       {showTrace && <TracePanel code={code} onClose={toggleTrace} />}
       {workerDown && (
         <div className="banner">
@@ -670,42 +686,97 @@ function EscapeChamber(props: { code: string; operator: string; data: EscapeData
   const { code, operator, data } = props;
   const hold = useCallback((on: boolean) => chamberAction(code, operator, 'hold', on), [code, operator]);
 
-  if (data.phase === 'override') {
-    return (
-      <div className="chamber">
-        <p className="objective">Override the vault lock. The Riddler's machine will fight back.</p>
-        {!data.overrideStarted ? (
-          <button className="primary big" onClick={() => chamberAction(code, operator, 'reboot')}>
-            ⚡ Initiate override
-          </button>
-        ) : (
-          <div className="override">
-            <div className="spinner" />
-            <p className="muted">
-              Override in progress — the lock keeps rejecting us. Temporal is auto-retrying the activity with backoff.
-              <br />
-              Watch it live in the Temporal UI at <code>localhost:8233</code>.
-            </p>
-          </div>
-        )}
-      </div>
-    );
-  }
-
-  // phase 'hold' (or 'open')
   return (
     <div className="chamber">
-      {data.overrideAttempts != null && (
-        <p className="objective">Vault override succeeded after {data.overrideAttempts} attempts. Now hold the exit together.</p>
-      )}
-      <div className="holders">
-        {data.operators.map((op) => (
-          <div key={op} className={`hold-chip ${data.holders[op] ? 'on' : ''} ${op === operator ? 'me' : ''}`}>
-            {op}{op === operator ? ' (you)' : ''} — {data.holders[op] ? 'HOLDING' : 'waiting'}
-          </div>
+      <div className="vault-stage">
+        {data.phase === 'override' ? (
+          !data.overrideStarted ? (
+            <div className="vault-frame">
+              <div className="vault-readout">LOCKED</div>
+              <div className="vault-keypad">
+                {Array.from({ length: 12 }, (_, i) => (
+                  <span key={i} className="vkey dim" />
+                ))}
+              </div>
+              <button className="primary big" onClick={() => chamberAction(code, operator, 'reboot')}>
+                ⚡ Initiate override
+              </button>
+            </div>
+          ) : (
+            <div className="vault-frame">
+              <VaultFight attempt={data.attempt} />
+              <p className="muted small">
+                Temporal is auto-retrying the override activity with backoff. Flip on the ⚙ workflow trace to watch the
+                real attempts.
+              </p>
+            </div>
+          )
+        ) : (
+          <VaultReveal>
+            {data.overrideAttempts != null && (
+              <p className="objective">Vault cracked on attempt {data.overrideAttempts}. Hold the exit together!</p>
+            )}
+            <ChargeButton onArmedChange={hold} />
+            <div className="holders">
+              {data.operators.map((op) => (
+                <div key={op} className={`hold-chip ${data.holders[op] ? 'on' : ''} ${op === operator ? 'me' : ''}`}>
+                  {op}
+                  {op === operator ? ' (you)' : ''} — {data.holders[op] ? 'HOLDING' : 'waiting'}
+                </div>
+              ))}
+            </div>
+          </VaultReveal>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// The vault lock fighting back while Temporal retries: scrambling code, red keypad,
+// periodic "ACCESS DENIED" shakes, sparks.
+function VaultFight(props: { attempt?: number }) {
+  const [readout, setReadout] = useState('0000');
+  const [denied, setDenied] = useState(false);
+  useEffect(() => {
+    let n = 0;
+    const id = setInterval(() => {
+      n++;
+      setReadout(Array.from({ length: 4 }, () => Math.floor(Math.random() * 10)).join(''));
+      if (n % 7 === 0) {
+        setDenied(true);
+        setTimeout(() => setDenied(false), 480);
+      }
+    }, 130);
+    return () => clearInterval(id);
+  }, []);
+  return (
+    <div className={`vault-fight ${denied ? 'denied' : ''}`}>
+      <div className="vault-readout">{denied ? 'DENIED' : readout}</div>
+      <div className="vault-sublabel">
+        Temporal retry — attempt <strong>{props.attempt ?? '…'}</strong>
+      </div>
+      <div className="vault-keypad">
+        {Array.from({ length: 12 }, (_, i) => (
+          <span key={i} className="vkey" style={{ animationDelay: `${(i % 5) * 0.11}s` }} />
         ))}
       </div>
-      <ChargeButton onArmedChange={hold} />
+      <div className="vault-sparks" aria-hidden>
+        {Array.from({ length: 6 }, (_, i) => (
+          <i key={i} style={{ left: `${8 + i * 16}%`, animationDelay: `${i * 0.18}s` }} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// Vault doors slide open on mount, revealing the hold ring inside.
+function VaultReveal(props: { children: ReactNode }) {
+  return (
+    <div className="vault-reveal">
+      <div className="vault-granted">✓ ACCESS GRANTED</div>
+      <div className="rdoor left" />
+      <div className="rdoor right" />
+      <div className="vault-inner">{props.children}</div>
     </div>
   );
 }

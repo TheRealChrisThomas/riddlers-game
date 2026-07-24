@@ -111,6 +111,11 @@ async function main() {
     if (!activeId) return res.json({ workerReachable: true, chamber: null });
     try {
       const chamber = await withTimeout(client.workflow.getHandle(activeId).query(getChamberQuery), 2000);
+      // Sync the vault fight to Temporal's real retries: inject the live attempt number.
+      if (chamber.type === 'escape' && chamber.data.kind === 'escape' && chamber.data.phase === 'override' && chamber.data.overrideStarted) {
+        const attempt = await overrideAttempt(client, activeId);
+        if (attempt) chamber.data.attempt = attempt;
+      }
       lastChamber.set(code, chamber);
       res.json({ workerReachable: true, chamber });
     } catch (err) {
@@ -240,6 +245,20 @@ function collectEvents(hist: any, wf: 'case' | 'chamber', out: TraceItem[]) {
     const d = describeEvent(e);
     if (d) out.push({ t: eventMs(e), wf, kind: d.kind, detail: d.detail });
   }
+}
+
+async function overrideAttempt(client: Client, workflowId: string): Promise<number | undefined> {
+  try {
+    const desc: any = await withTimeout(
+      client.workflowService.describeWorkflowExecution({ namespace: 'default', execution: { workflowId } }),
+      2000,
+    );
+    const pa = (desc.pendingActivities ?? []).find((p: any) => p.activityType?.name === 'overrideVault');
+    if (pa) return Number(pa.attempt ?? 1);
+  } catch {
+    /* describe unavailable */
+  }
+  return undefined;
 }
 
 async function collectPendingActivities(client: Client, workflowId: string, out: TraceItem[]) {
