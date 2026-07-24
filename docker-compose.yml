@@ -1,0 +1,11 @@
+# Single-container Temporal dev server. No external database — in-memory state,
+# which is fine here: the interesting durability (workflow history) is what makes
+# the kill-and-recover demo work, and that survives a WORKER restart. If you want
+# state to survive restarting the Temporal SERVER too, add --db-filename below.
+services:
+  temporal:
+    image: temporalio/temporal:latest # pin a specific tag for reproducible demos
+    command: server start-dev --ip 0.0.0.0 --log-level warn
+    ports:
+      - "7233:7233" # gRPC frontend (SDK connects here)
+      - "8233:8233" # Web UI -> http://localhost:8233
