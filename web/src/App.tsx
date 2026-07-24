@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { Ambient } from './Ambient';
+import { Riddler, RoleAvatar, VictoryBats, type RiddlerMood } from './pixel';
 import {
   ChamberResponse,
   ChamberState,
@@ -61,24 +63,28 @@ export function App() {
   const [code, setCode] = useState(params.get('case') ?? '');
   const [joined, setJoined] = useState(false);
 
-  if (!joined) {
-    return (
-      <Lobby
-        operator={operator}
-        code={code}
-        setOperator={setOperator}
-        setCode={setCode}
-        onEnter={(c, op) => {
-          localStorage.setItem('operator', op);
-          history.replaceState(null, '', `?case=${c}`);
-          setCode(c);
-          setOperator(op);
-          setJoined(true);
-        }}
-      />
-    );
-  }
-  return <Case code={code} operator={operator} onLeave={() => setJoined(false)} />;
+  return (
+    <>
+      <Ambient />
+      {!joined ? (
+        <Lobby
+          operator={operator}
+          code={code}
+          setOperator={setOperator}
+          setCode={setCode}
+          onEnter={(c, op) => {
+            localStorage.setItem('operator', op);
+            history.replaceState(null, '', `?case=${c}`);
+            setCode(c);
+            setOperator(op);
+            setJoined(true);
+          }}
+        />
+      ) : (
+        <Case code={code} operator={operator} onLeave={() => setJoined(false)} />
+      )}
+    </>
+  );
 }
 
 // --- Lobby: name + create/join ---
@@ -177,8 +183,10 @@ function Case(props: { code: string; operator: string; onLeave: () => void }) {
   const [fatal, setFatal] = useState('');
   const [dialog, setDialog] = useState<string | null>(null);
   const [showTrace, setShowTrace] = useState(localStorage.getItem('showTrace') === '1');
+  const [moodFlash, setMoodFlash] = useState<RiddlerMood | null>(null);
   const shownDialog = useRef('');
   const lastTaunt = useRef(0);
+  const prevChamber = useRef(0);
   const busy = useRef(false);
 
   const toggleTrace = () => {
@@ -208,6 +216,18 @@ function Case(props: { code: string; operator: string; onLeave: () => void }) {
       if (t.id > 0) setDialog(t.text);
     }
   }, [shellResp?.shell.taunt?.id]);
+
+  // Riddler scowls briefly each time you clear a chamber.
+  useEffect(() => {
+    const idx = shellResp?.shell.chamberIndex ?? 0;
+    if (shellResp?.shell.status === 'in_chamber' && idx > prevChamber.current) {
+      setMoodFlash('scowl');
+      const t = setTimeout(() => setMoodFlash(null), 2600);
+      prevChamber.current = idx;
+      return () => clearTimeout(t);
+    }
+    prevChamber.current = idx;
+  }, [shellResp?.shell.chamberIndex, shellResp?.shell.status]);
 
   useEffect(() => {
     let alive = true;
@@ -247,10 +267,29 @@ function Case(props: { code: string; operator: string; onLeave: () => void }) {
 
   const shell = shellResp.shell;
   const workerDown = !shellResp.workerReachable || (chamberResp ? !chamberResp.workerReachable : false);
+  const chamberData = chamberResp?.chamber?.data;
+  const baseMood: RiddlerMood =
+    shell.status === 'escaped'
+      ? 'defeat'
+      : shell.status === 'failed'
+        ? 'gloat'
+        : chamberData?.kind === 'deathtrap' && chamberData.compensating
+          ? 'cackle'
+          : dialog
+            ? 'cackle'
+            : 'idle';
+  const mascotMood = moodFlash ?? baseMood;
+  const remainingMs = shell.deadlineEpochMs ? shell.deadlineEpochMs - now : Infinity;
+  const danger = shell.status === 'in_chamber' && remainingMs < 30_000;
 
   return (
     <div className="shell room">
       {dialog && <RiddlerDialog message={dialog} onClose={() => setDialog(null)} />}
+      {danger && <div className="danger-pulse" aria-hidden />}
+      {shell.status === 'escaped' && <VictoryBats />}
+      <div className="mascot">
+        <Riddler mood={mascotMood} size={112} />
+      </div>
       {showTrace && <TracePanel code={code} onClose={toggleTrace} />}
       {workerDown && (
         <div className="banner">
@@ -295,7 +334,7 @@ function RiddlerDialog(props: { message: string; onClose: () => void }) {
     <div className="modal-overlay" onClick={props.onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <div className="riddler-head">
-          <span className="riddler-avatar">?</span>
+          <Riddler mood="cackle" size={64} />
           <span className="riddler-name">THE RIDDLER</span>
         </div>
         <p className="riddler-msg">{props.message}</p>
@@ -393,8 +432,11 @@ function Staging(props: { code: string; operator: string; shell: ShellState }) {
       <div className="roster">
         {shell.roster.map((p) => (
           <div key={p.operator} className={`hero role-${p.role} ${p.operator === operator ? 'me' : ''}`}>
-            <span className="hero-role">{ROLE_LABEL[p.role]}</span>
-            <span className="hero-name">{p.operator}{p.operator === operator ? ' (you)' : ''}</span>
+            <RoleAvatar role={p.role} size={44} />
+            <div className="hero-text">
+              <span className="hero-role">{ROLE_LABEL[p.role]}</span>
+              <span className="hero-name">{p.operator}{p.operator === operator ? ' (you)' : ''}</span>
+            </div>
           </div>
         ))}
       </div>
@@ -728,6 +770,12 @@ function ChargeButton(props: { onArmedChange: (on: boolean) => void }) {
 function EndScreen(props: { won: boolean; onReplay: () => void }) {
   return (
     <div className={`overlay ${props.won ? 'won' : 'lost'}`}>
+      {props.won && (
+        <div className="vault" aria-hidden>
+          <div className="vault-door left" />
+          <div className="vault-door right" />
+        </div>
+      )}
       <h2>{props.won ? '🦇 THE BAT-FAMILY ESCAPES' : '☠️ THE RIDDLER WINS'}</h2>
       <p className="muted">
         {props.won ? 'All three chambers cleared before the clock.' : 'The trap sprang before you got out.'}

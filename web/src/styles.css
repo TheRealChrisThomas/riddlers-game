@@ -74,7 +74,8 @@ button:disabled { opacity: 0.45; cursor: default; }
 /* --- Staging / roster --- */
 .staging h2 { margin: 0 0 6px; }
 .roster { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; margin: 16px 0; }
-.hero { border: 1px solid var(--line); border-radius: 10px; padding: 14px; display: flex; flex-direction: column; gap: 4px; border-left-width: 4px; }
+.hero { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; display: flex; flex-direction: row; align-items: center; gap: 10px; border-left-width: 4px; }
+.hero-text { display: flex; flex-direction: column; gap: 2px; }
 .hero-role { font-weight: 700; font-size: 13px; }
 .hero-name { color: var(--muted); font-size: 13px; }
 .hero.me { outline: 1px dashed var(--muted); }
@@ -190,6 +191,39 @@ button:disabled { opacity: 0.45; cursor: default; }
 .trace-foot { display: block; padding: 10px 14px; border-top: 1px solid var(--line); color: var(--muted); text-decoration: none; font-size: 11px; }
 .trace-foot:hover { color: var(--riddler); }
 
+/* --- Pixel Riddler + moods --- */
+.riddler { display: inline-block; line-height: 0; }
+.riddler-svg { display: block; image-rendering: pixelated; }
+.riddler.mood-idle .riddler-svg { animation: bob 2.4s ease-in-out infinite; }
+.riddler.mood-cackle .riddler-svg { animation: cackle 0.34s ease-in-out infinite; transform-origin: 50% 90%; }
+.riddler.mood-scowl { filter: drop-shadow(0 0 9px rgba(255,80,80,0.45)); }
+.riddler.mood-scowl .riddler-svg { animation: lean 1.3s ease-in-out infinite; transform-origin: 50% 100%; }
+.riddler.mood-gloat { filter: drop-shadow(0 0 12px rgba(70,227,90,0.6)); }
+.riddler.mood-gloat .riddler-svg { animation: sway 0.55s ease-in-out infinite; transform-origin: 50% 100%; }
+.riddler.mood-defeat .riddler-svg { animation: slump 0.8s ease-out forwards; filter: grayscale(0.65) brightness(0.7); transform-origin: 50% 100%; }
+@keyframes bob { 50% { transform: translateY(-6%); } }
+@keyframes cackle { 0%,100% { transform: rotate(-5deg) translateY(0); } 50% { transform: rotate(5deg) translateY(-6%); } }
+@keyframes lean { 50% { transform: rotate(-4deg); } }
+@keyframes sway { 0%,100% { transform: translateX(-6%) rotate(-3deg); } 50% { transform: translateX(6%) rotate(3deg); } }
+@keyframes slump { to { transform: translateY(8%) rotate(-7deg); } }
+
+/* corner mascot in a case */
+.mascot { position: fixed; left: 16px; bottom: 12px; z-index: 30; pointer-events: none; }
+.mascot::after { content: ''; position: absolute; left: 50%; bottom: 4px; width: 76%; height: 10px; transform: translateX(-50%); background: radial-gradient(ellipse, rgba(70,227,90,0.35), transparent 70%); }
+@media (max-width: 720px) { .mascot { display: none; } }
+
+/* --- Ambient background --- */
+.ambient-bg { position: fixed; inset: 0; z-index: -1; overflow: hidden; pointer-events: none; }
+.bat-glow { position: absolute; top: -14%; left: 50%; width: 420px; height: 420px; transform: translateX(-50%); border-radius: 50%; background: radial-gradient(circle, rgba(245,197,24,0.07), transparent 62%); animation: batglow 13s ease-in-out infinite; }
+@keyframes batglow { 0%,100% { opacity: 0.5; transform: translateX(-56%) scale(0.95); } 50% { opacity: 1; transform: translateX(-44%) scale(1.08); } }
+.qmarks span { position: absolute; bottom: -6vh; color: var(--riddler); font-weight: 800; animation-name: drift; animation-timing-function: linear; animation-iteration-count: infinite; text-shadow: 0 0 10px rgba(70,227,90,0.4); }
+@keyframes drift { to { transform: translateY(-118vh) rotate(20deg); } }
+
+/* --- CRT overlay --- */
+.crt-overlay { position: fixed; inset: 0; z-index: 60; pointer-events: none; background: repeating-linear-gradient(rgba(0,0,0,0.14) 0 1px, transparent 1px 3px); animation: flicker 6s steps(60) infinite; }
+.crt-overlay::after { content: ''; position: absolute; inset: 0; background: radial-gradient(ellipse at center, transparent 62%, rgba(0,0,0,0.35)); }
+@keyframes flicker { 0%,100% { opacity: 0.5; } 48% { opacity: 0.55; } 50% { opacity: 0.4; } 52% { opacity: 0.55; } }
+
 /* Riddler dialog */
 .modal-overlay { position: fixed; inset: 0; background: rgba(2,6,4,0.78); backdrop-filter: blur(3px); display: flex; align-items: center; justify-content: center; padding: 24px; z-index: 50; animation: fade 0.2s; }
 @keyframes fade { from { opacity: 0; } }
@@ -199,6 +233,26 @@ button:disabled { opacity: 0.45; cursor: default; }
 .riddler-avatar { width: 46px; height: 46px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 30px; font-weight: 800; color: #04120a; background: var(--riddler); box-shadow: 0 0 20px rgba(70,227,90,0.6); transform: rotate(-8deg); }
 .riddler-name { letter-spacing: 4px; font-weight: 700; color: var(--riddler); }
 .riddler-msg { font-size: 17px; line-height: 1.6; font-style: italic; margin: 0 0 22px; }
+
+/* --- Set-pieces: danger pulse, victory bats, vault door --- */
+.danger-pulse { position: fixed; inset: 0; z-index: 45; pointer-events: none; box-shadow: inset 0 0 110px 24px rgba(255,60,60,0.5); animation: dangerpulse 1s ease-in-out infinite; }
+@keyframes dangerpulse { 50% { box-shadow: inset 0 0 60px 10px rgba(255,60,60,0.25); } }
+
+.bats { position: fixed; inset: 0; z-index: 55; pointer-events: none; overflow: hidden; }
+.bat { position: absolute; bottom: -10vh; line-height: 0; animation-name: batfly; animation-timing-function: linear; animation-fill-mode: forwards; }
+@keyframes batfly { from { transform: translateY(0) rotate(0); opacity: 1; } to { transform: translateY(-125vh) translateX(28px) rotate(24deg); opacity: 0.7; } }
+
+.vault { position: absolute; inset: 0; z-index: 1; overflow: hidden; border-radius: 12px; }
+.vault-door { position: absolute; top: 0; bottom: 0; width: 50%; background: linear-gradient(180deg, #1a222b, #0c1116); box-shadow: inset 0 0 40px rgba(0,0,0,0.6); }
+.vault-door.left { left: 0; border-right: 2px solid #05323f; animation: doorL 1.3s cubic-bezier(0.6,0,0.2,1) forwards; }
+.vault-door.right { right: 0; border-left: 2px solid #05323f; animation: doorR 1.3s cubic-bezier(0.6,0,0.2,1) forwards; }
+.vault-door::before { content: ''; position: absolute; top: 50%; width: 46px; height: 46px; border: 4px solid #35505e; border-radius: 50%; transform: translateY(-50%); }
+.vault-door.left::before { right: -25px; }
+.vault-door.right::before { left: -25px; }
+@keyframes doorL { to { transform: translateX(-101%); } }
+@keyframes doorR { to { transform: translateX(101%); } }
+.overlay { position: relative; overflow: hidden; }
+.overlay h2, .overlay p, .overlay .primary { position: relative; z-index: 2; }
 
 /* End + log */
 .overlay { text-align: center; padding: 28px; border-radius: 12px; border: 1px solid var(--line); }
