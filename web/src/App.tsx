@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { Ambient } from './Ambient';
-import { HeroMascot, Riddler, RoleAvatar, VictoryBats, type HeroMood, type RiddlerMood } from './pixel';
+import { BatEmblem, HeroMascot, Riddler, RoleAvatar, VictoryBats, type HeroMood, type RiddlerMood } from './pixel';
 import {
+  BatcomputerState,
   ChamberResponse,
   ChamberState,
   ChamberType,
   DeathtrapData,
   EscapeData,
+  HubResponse,
   RiddleData,
   Role,
   ROLE_LABEL,
@@ -14,6 +16,10 @@ import {
   ShellResponse,
   ShellState,
   TraceEvent,
+  VILLAIN_META,
+  VILLAINS,
+  Villain,
+  VillainStatus,
 } from './types';
 
 const POLL_MS = 1000;
@@ -28,6 +34,12 @@ const RIDDLER: Record<ChamberType, string> = {
     'The vault answers only to my machine. Override it — if it lets you — then hold the exit together, or die apart. Ha ha ha!',
 };
 
+const RIDDLER_DEFEAT =
+  "Tick… tock… stopped. Riddle me this, Bat-Family: what's colder than my laughter? Your defeat. The trap wins, and I remain forever unsolved. HA HA HA!";
+
+const RIDDLER_CONCEDE =
+  'No… NO! My perfect puzzle — solved?! Enjoy the night, Bat-Family. But every riddle you answer only makes the next one deadlier…';
+
 // --- API helpers ---
 const post = (path: string, body?: unknown) =>
   fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body ?? {}) });
@@ -39,11 +51,16 @@ async function createCase(durationMinutes: number): Promise<string> {
 }
 const joinCase = (code: string, operator: string) => post(`/api/cases/${code}/join`, { operator });
 const setRoleReq = (code: string, operator: string, role: Role) => post(`/api/cases/${code}/role`, { operator, role });
-const startCase = (code: string) => post(`/api/cases/${code}/start`);
-const replayCase = (code: string) => post(`/api/cases/${code}/replay`);
+const batSignalReq = (code: string, villain: Villain) => post(`/api/cases/${code}/batsignal`, { villain });
 const chamberAction = (code: string, operator: string, action: string, value?: unknown) =>
   post(`/api/cases/${code}/chamber/action`, { operator, action, value });
 
+async function getHub(code: string): Promise<HubResponse | null> {
+  const r = await fetch(`/api/cases/${code}/hub`);
+  if (r.status === 404) throw new Error('Case not found');
+  if (!r.ok) return null;
+  return (await r.json()) as HubResponse;
+}
 async function getShell(code: string): Promise<ShellResponse | null> {
   const r = await fetch(`/api/cases/${code}/shell`);
   if (r.status === 404) throw new Error('Case not found');
@@ -81,7 +98,7 @@ export function App() {
           }}
         />
       ) : (
-        <Case code={code} operator={operator} onLeave={() => setJoined(false)} />
+        <Batcomputer code={code} operator={operator} onLogout={() => setJoined(false)} />
       )}
     </>
   );
@@ -134,11 +151,11 @@ function Lobby(props: {
     <div className="shell">
       <div className="card">
         <h1 className="logo">
-          <span className="q">?</span> THE RIDDLER'S GAME
+          <span className="q">?</span> BATMAN ADVENTURES
         </h1>
         <p className="tagline">
-          A co-op escape room running on Temporal. The Bat-Family is trapped in three chambers. Clear them
-          together before the clock runs out.
+          Co-op escape rooms running on Temporal. Boot the Bat-computer, gather the Bat-Family, and light the
+          signal on a villain. Each case is its own durable workflow.
         </p>
 
         <label className="field">
@@ -175,17 +192,19 @@ function Lobby(props: {
 }
 
 // --- Case: polls shell + chamber, routes by status ---
-function Case(props: { code: string; operator: string; onLeave: () => void }) {
-  const { code, operator, onLeave } = props;
+function Case(props: { code: string; operator: string; villain: Villain; onBackToHub: () => void }) {
+  const { code, operator, villain, onBackToHub } = props;
   const [shellResp, setShellResp] = useState<ShellResponse | null>(null);
   const [chamberResp, setChamberResp] = useState<ChamberResponse | null>(null);
   const [now, setNow] = useState(Date.now());
   const [fatal, setFatal] = useState('');
-  const [dialog, setDialog] = useState<string | null>(null);
+  const [dialog, setDialog] = useState<string | null>(null); // chamber intros → center modal
+  const [bubble, setBubble] = useState<string | null>(null); // timed taunts → speech bubble
   const [showTrace, setShowTrace] = useState(localStorage.getItem('showTrace') === '1');
   const [moodFlash, setMoodFlash] = useState<RiddlerMood | null>(null);
   const shownDialog = useRef('');
   const lastTaunt = useRef(0);
+  const bubbleTimer = useRef(0);
   const prevChamber = useRef(0);
   const busy = useRef(false);
 
@@ -196,38 +215,54 @@ function Case(props: { code: string; operator: string; onLeave: () => void }) {
     });
   };
 
-  // Pop the Riddler's dialog whenever a new chamber begins.
+  // Pop the Riddler's dialog when a new chamber begins, or when he wins.
   useEffect(() => {
     const s = shellResp?.shell;
-    if (s?.status === 'in_chamber' && s.chamberType) {
+    if (!s) return;
+    if (s.status === 'in_chamber' && s.chamberType) {
       const key = `c${s.chamberIndex}`;
       if (key !== shownDialog.current) {
         shownDialog.current = key;
         setDialog(RIDDLER[s.chamberType]);
       }
+    } else if (s.status === 'failed' && shownDialog.current !== 'defeat') {
+      shownDialog.current = 'defeat';
+      setDialog(RIDDLER_DEFEAT);
+    } else if (s.status === 'escaped' && shownDialog.current !== 'concede') {
+      // he loses: mutter a bitter concession from the corner (bubble, not a blocking modal)
+      shownDialog.current = 'concede';
+      setBubble(RIDDLER_CONCEDE);
+      clearTimeout(bubbleTimer.current);
+      bubbleTimer.current = window.setTimeout(() => setBubble(null), 12000);
     }
-  }, [shellResp?.shell.status, shellResp?.shell.chamberIndex, shellResp?.shell.chamberType]);
+  }, [shellResp?.shell?.status, shellResp?.shell?.chamberIndex, shellResp?.shell?.chamberType]);
 
-  // Timed taunts pushed by the workflow → pop them as dialogs too.
+  // Timed taunts pushed by the workflow → speech bubble over the Riddler that auto-fades.
   useEffect(() => {
-    const t = shellResp?.shell.taunt;
+    const t = shellResp?.shell?.taunt;
     if (t && t.id !== lastTaunt.current) {
       lastTaunt.current = t.id;
-      if (t.id > 0) setDialog(t.text);
+      if (t.id > 0) {
+        setBubble(t.text);
+        clearTimeout(bubbleTimer.current);
+        bubbleTimer.current = window.setTimeout(() => setBubble(null), 7000);
+      }
     }
-  }, [shellResp?.shell.taunt?.id]);
+  }, [shellResp?.shell?.taunt?.id]);
+
+  useEffect(() => () => clearTimeout(bubbleTimer.current), []);
 
   // Riddler scowls briefly each time you clear a chamber.
   useEffect(() => {
-    const idx = shellResp?.shell.chamberIndex ?? 0;
-    if (shellResp?.shell.status === 'in_chamber' && idx > prevChamber.current) {
+    const idx = shellResp?.shell?.chamberIndex ?? 0;
+    if (shellResp?.shell?.status === 'in_chamber' && idx > prevChamber.current) {
       setMoodFlash('scowl');
       const t = setTimeout(() => setMoodFlash(null), 2600);
       prevChamber.current = idx;
       return () => clearTimeout(t);
     }
     prevChamber.current = idx;
-  }, [shellResp?.shell.chamberIndex, shellResp?.shell.status]);
+  }, [shellResp?.shell?.chamberIndex, shellResp?.shell?.status]);
 
   useEffect(() => {
     let alive = true;
@@ -238,7 +273,7 @@ function Case(props: { code: string; operator: string; onLeave: () => void }) {
         const s = await getShell(code);
         if (alive && s) {
           setShellResp(s);
-          if (s.shell.status === 'in_chamber') {
+          if (s.shell?.status === 'in_chamber') {
             const c = await getChamber(code);
             if (alive && c) setChamberResp(c);
           }
@@ -262,8 +297,8 @@ function Case(props: { code: string; operator: string; onLeave: () => void }) {
     return () => clearInterval(id);
   }, []);
 
-  if (fatal) return <Centered><p className="error">{fatal}</p><button className="ghost" onClick={onLeave}>Back</button></Centered>;
-  if (!shellResp) return <Centered><p className="tagline">Connecting to case {code}…</p></Centered>;
+  if (fatal) return <Centered><p className="error">{fatal}</p><button className="ghost" onClick={onBackToHub}>Back to Bat-computer</button></Centered>;
+  if (!shellResp || !shellResp.shell) return <Centered><p className="tagline">Entering the {VILLAIN_META[villain].name} case…</p></Centered>;
 
   const shell = shellResp.shell;
   const workerDown = !shellResp.workerReachable || (chamberResp ? !chamberResp.workerReachable : false);
@@ -275,7 +310,7 @@ function Case(props: { code: string; operator: string; onLeave: () => void }) {
         ? 'gloat'
         : chamberData?.kind === 'deathtrap' && chamberData.compensating
           ? 'cackle'
-          : dialog
+          : dialog || bubble
             ? 'cackle'
             : 'idle';
   const mascotMood = moodFlash ?? baseMood;
@@ -294,11 +329,12 @@ function Case(props: { code: string; operator: string; onLeave: () => void }) {
   const danger = shell.status === 'in_chamber' && remainingMs < 30_000;
 
   return (
-    <div className="shell room">
+    <div className={`shell room${showTrace ? ' trace-open' : ''}`}>
       {dialog && <RiddlerDialog message={dialog} onClose={() => setDialog(null)} />}
       {danger && <div className="danger-pulse" aria-hidden />}
       {shell.status === 'escaped' && <VictoryBats />}
       <div className="mascot">
+        {bubble && <div className="speech" onClick={() => setBubble(null)}>{bubble}</div>}
         <Riddler mood={mascotMood} size={112} />
       </div>
       {myHero && (
@@ -314,9 +350,7 @@ function Case(props: { code: string; operator: string; onLeave: () => void }) {
         </div>
       )}
 
-      <TopBar code={code} onLeave={onLeave} showTrace={showTrace} onToggleTrace={toggleTrace} />
-
-      {shell.status === 'lobby' && <Staging code={code} operator={operator} shell={shell} />}
+      <TopBar code={code} villainLabel={VILLAIN_META[villain].name} onBack={onBackToHub} showTrace={showTrace} onToggleTrace={toggleTrace} />
 
       {shell.status === 'in_chamber' && (
         <>
@@ -335,8 +369,9 @@ function Case(props: { code: string; operator: string; onLeave: () => void }) {
           onReplay={() => {
             shownDialog.current = ''; // let chamber dialogs fire again
             lastTaunt.current = 0;
-            replayCase(code);
+            batSignalReq(code, villain); // re-light the signal → a fresh adventure run
           }}
+          onBackToHub={onBackToHub}
         />
       )}
 
@@ -368,19 +403,20 @@ function Centered(props: { children: ReactNode }) {
   );
 }
 
-function TopBar(props: { code: string; onLeave: () => void; showTrace: boolean; onToggleTrace: () => void }) {
+function TopBar(props: { code: string; villainLabel: string; onBack: () => void; showTrace: boolean; onToggleTrace: () => void }) {
   const shareUrl = `${location.origin}/?case=${props.code}`;
   return (
     <div className="topbar">
       <div>
-        <span className="muted">CASE</span> <strong className="code">{props.code}</strong>
+        <button className="link" onClick={props.onBack}>◂ Bat-computer</button>
+        <span className="muted"> · CASE</span> <strong className="code">{props.code}</strong>
+        <span className="muted"> · {props.villainLabel}</span>
         <button className="link" onClick={() => navigator.clipboard?.writeText(shareUrl)}>copy invite link</button>
       </div>
       <div>
         <button className={`link ${props.showTrace ? 'on' : ''}`} onClick={props.onToggleTrace}>
           {props.showTrace ? '● workflow' : '○ workflow'}
         </button>
-        <button className="link" onClick={props.onLeave}>leave</button>
       </div>
     </div>
   );
@@ -437,37 +473,203 @@ function TracePanel(props: { code: string; onClose: () => void }) {
   );
 }
 
-// --- Staging lobby: roster, role picker, start ---
-function Staging(props: { code: string; operator: string; shell: ShellState }) {
-  const { code, operator, shell } = props;
-  const me = shell.roster.find((p) => p.operator === operator);
+// ============================================================================
+// Batcomputer: the hub. Polls the grandparent workflow, assembles the team,
+// and routes into the active adventure. Picking a villain fires the Bat-Signal.
+// ============================================================================
+function Batcomputer(props: { code: string; operator: string; onLogout: () => void }) {
+  const { code, operator, onLogout } = props;
+  const [hubResp, setHubResp] = useState<HubResponse | null>(null);
+  const [fatal, setFatal] = useState('');
+  const [dismissedAdv, setDismissedAdv] = useState<string | null>(null);
+  const [signalling, setSignalling] = useState<Villain | null>(null);
+  const [showTrace, setShowTrace] = useState(localStorage.getItem('showTrace') === '1');
+  const joined = useRef(false);
+  const busy = useRef(false);
+
+  const toggleTrace = () =>
+    setShowTrace((v) => {
+      localStorage.setItem('showTrace', v ? '0' : '1');
+      return !v;
+    });
+
+  // Ensure we're on the roster (idempotent), then poll the hub.
+  useEffect(() => {
+    let alive = true;
+    const tick = async () => {
+      if (busy.current) return;
+      busy.current = true;
+      try {
+        if (!joined.current) {
+          await joinCase(code, operator);
+          joined.current = true;
+        }
+        const h = await getHub(code);
+        if (alive && h) setHubResp(h);
+      } catch (e) {
+        if (alive) setFatal(String((e as Error).message));
+      } finally {
+        busy.current = false;
+      }
+    };
+    tick();
+    const id = setInterval(tick, POLL_MS);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, [code, operator]);
+
+  if (fatal)
+    return (
+      <Centered>
+        <p className="error">{fatal}</p>
+        <button className="ghost" onClick={onLogout}>Back</button>
+      </Centered>
+    );
+  if (!hubResp) return <Centered><p className="tagline">Booting the Bat-computer… case {code}</p></Centered>;
+
+  const hub = hubResp.hub;
+  const activeAdv = hub.activeAdventureId;
+  const inAdventure = !!activeAdv && activeAdv !== dismissedAdv && hub.activeVillain;
+
+  // An adventure is live (or freshly ended) → drop into the case view.
+  if (inAdventure) {
+    return <Case code={code} operator={operator} villain={hub.activeVillain!} onBackToHub={() => setDismissedAdv(activeAdv)} />;
+  }
+
+  const me = hub.roster.find((p) => p.operator === operator);
+  const canLaunch = hub.roster.length > 0;
+
+  const fire = (villain: Villain) => {
+    if (VILLAIN_META[villain].locked || !canLaunch) return;
+    setDismissedAdv(null); // re-arm routing so the next launch drops us in
+    setSignalling(villain); // play the beam, then send the real signal
+  };
+
   return (
-    <div className="card staging">
-      <h2>Assemble the Bat-Family</h2>
-      <p className="muted">Everyone picks a role, then anyone can start. Share the case code to bring in your team.</p>
-      <div className="roster">
-        {shell.roster.map((p) => (
-          <div key={p.operator} className={`hero role-${p.role} ${p.operator === operator ? 'me' : ''}`}>
-            <RoleAvatar role={p.role} size={44} />
-            <div className="hero-text">
-              <span className="hero-role">{ROLE_LABEL[p.role]}</span>
-              <span className="hero-name">{p.operator}{p.operator === operator ? ' (you)' : ''}</span>
-            </div>
-          </div>
-        ))}
-      </div>
-      <div className="roles">
-        {ROLES.map((r) => (
-          <button
-            key={r}
-            className={`rolebtn role-${r} ${me?.role === r ? 'active' : ''}`}
-            onClick={() => setRoleReq(code, operator, r)}
-          >
-            {ROLE_LABEL[r]}
+    <div className="shell room hub">
+      {signalling && (
+        <BatSignal
+          villain={signalling}
+          onDone={() => {
+            batSignalReq(code, signalling);
+            setSignalling(null);
+          }}
+        />
+      )}
+      {showTrace && <TracePanel code={code} onClose={toggleTrace} />}
+
+      <div className="topbar">
+        <div>
+          <span className="muted">BAT-COMPUTER · CASE</span> <strong className="code">{code}</strong>
+          <button className="link" onClick={() => navigator.clipboard?.writeText(`${location.origin}/?case=${code}`)}>copy invite link</button>
+        </div>
+        <div>
+          <span className="hub-score">SCORE {hub.score}</span>
+          <button className={`link ${showTrace ? 'on' : ''}`} onClick={toggleTrace}>
+            {showTrace ? '● workflow' : '○ workflow'}
           </button>
-        ))}
+          <button className="link" onClick={onLogout}>leave</button>
+        </div>
       </div>
-      <button className="primary" onClick={() => startCase(code)}>Begin the escape</button>
+
+      <div className="card staging">
+        <h2>Assemble the Bat-Family</h2>
+        <p className="muted">Pick your role, then light the signal on a case file. Share the code to bring in your team.</p>
+        <div className="roster">
+          {hub.roster.map((p) => (
+            <div key={p.operator} className={`hero role-${p.role} ${p.operator === operator ? 'me' : ''}`}>
+              <RoleAvatar role={p.role} size={44} />
+              <div className="hero-text">
+                <span className="hero-role">{ROLE_LABEL[p.role]}</span>
+                <span className="hero-name">{p.operator}{p.operator === operator ? ' (you)' : ''}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+        <div className="roles">
+          {ROLES.map((r) => (
+            <button
+              key={r}
+              className={`rolebtn role-${r} ${me?.role === r ? 'active' : ''}`}
+              onClick={() => setRoleReq(code, operator, r)}
+            >
+              {ROLE_LABEL[r]}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="card casefiles">
+        <h2>Case files</h2>
+        <p className="muted">Each villain is its own Temporal workflow. Light the signal to begin.</p>
+        <div className="villain-grid">
+          {VILLAINS.map((v) => (
+            <VillainTile
+              key={v}
+              villain={v}
+              status={hub.statuses[v]}
+              canLaunch={canLaunch}
+              onFire={() => fire(v)}
+            />
+          ))}
+        </div>
+        {!canLaunch && <p className="hint">Assemble at least one hero before you can light the signal.</p>}
+      </div>
+
+      <LogFeed lines={hub.log} />
+    </div>
+  );
+}
+
+const STATUS_LABEL: Record<VillainStatus, string> = {
+  idle: 'Awaiting the signal',
+  running: 'In progress…',
+  escaped: 'Solved ✓',
+  failed: 'Case still open',
+};
+
+function VillainTile(props: { villain: Villain; status: VillainStatus; canLaunch: boolean; onFire: () => void }) {
+  const meta = VILLAIN_META[props.villain];
+  const disabled = meta.locked || !props.canLaunch;
+  return (
+    <button
+      className={`villain-tile v-${props.villain} ${meta.locked ? 'locked' : ''} status-${props.status}`}
+      disabled={disabled}
+      onClick={props.onFire}
+    >
+      <span className="villain-glyph" aria-hidden>{meta.locked ? '🔒' : meta.glyph}</span>
+      <span className="villain-name">{meta.name}</span>
+      <span className="villain-tagline">{meta.locked ? 'CASE FILE SEALED' : meta.tagline}</span>
+      <span className="villain-concept">{meta.concept}</span>
+      {!meta.locked && <span className={`villain-status vs-${props.status}`}>{STATUS_LABEL[props.status]}</span>}
+    </button>
+  );
+}
+
+// The Bat-Signal: a searchlight beam throws a glowing disc of light onto the Gotham
+// night sky with the black bat emblem projected inside it, then the villain answers
+// and the real Temporal signal is sent (see onDone). Pure client-side flourish.
+function BatSignal(props: { villain: Villain; onDone: () => void }) {
+  const meta = VILLAIN_META[props.villain];
+  useEffect(() => {
+    const t = setTimeout(props.onDone, 3200);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  return (
+    <div className="batsignal-overlay" aria-hidden>
+      <div className="batsignal-sky" />
+      <div className="batsignal-beam" />
+      <div className="batsignal-signal">
+        <div className="batsignal-disc" />
+        <BatEmblem color="#0a0d07" size={200} className="batsignal-bat" />
+      </div>
+      <div className="batsignal-caption">
+        <div className="batsignal-name">{meta.name} answers the signal</div>
+        <div className="batsignal-taunt">“{meta.intro}”</div>
+      </div>
     </div>
   );
 }
@@ -588,9 +790,21 @@ function DeathtrapChamber(props: { code: string; operator: string; shell: ShellS
           const active = i === displayIndex && !data.compensating;
           return (
             <div key={s.id} className={`wire role-${s.role} ${cut ? 'cut' : ''} ${active ? 'active' : ''}`}>
-              <span className="wire-role">{ROLE_LABEL[s.role]}</span>
+              <div className="wire-head">
+                <span className="wire-role">{ROLE_LABEL[s.role]}</span>
+                <span className="wire-state">{cut ? '✓ cut' : active ? 'live' : 'armed'}</span>
+              </div>
               <span className="wire-label">{s.label}</span>
-              <span className="wire-state">{cut ? '✓ cut' : active ? 'live' : 'armed'}</span>
+              <div className="wire-line" aria-hidden>
+                <span className="node" />
+                <span className="strand">
+                  <i className="half left" />
+                  <i className="half right" />
+                  <i className="pulse" />
+                  <i className="cut-spark" />
+                </span>
+                <span className="node" />
+              </div>
             </div>
           );
         })}
@@ -838,7 +1052,7 @@ function ChargeButton(props: { onArmedChange: (on: boolean) => void }) {
   );
 }
 
-function EndScreen(props: { won: boolean; onReplay: () => void }) {
+function EndScreen(props: { won: boolean; onReplay: () => void; onBackToHub: () => void }) {
   return (
     <div className={`overlay ${props.won ? 'won' : 'lost'}`}>
       {props.won && (
@@ -847,14 +1061,17 @@ function EndScreen(props: { won: boolean; onReplay: () => void }) {
           <div className="vault-door right" />
         </div>
       )}
-      <h2>{props.won ? '🦇 THE BAT-FAMILY ESCAPES' : '☠️ THE RIDDLER WINS'}</h2>
+      <h2>{props.won ? '🦇 THE BAT-FAMILY ESCAPES' : '☠️ THE VILLAIN WINS'}</h2>
       <p className="muted">
         {props.won ? 'All three chambers cleared before the clock.' : 'The trap sprang before you got out.'}
       </p>
-      <button className="primary" onClick={props.onReplay}>
-        {props.won ? 'Play again' : 'Try again'}
-      </button>
-      <p className="muted small">Same case code — the Riddler resets his chambers.</p>
+      <div className="endscreen-actions">
+        <button className="primary" onClick={props.onReplay}>
+          {props.won ? 'Play again' : 'Try again'}
+        </button>
+        <button className="ghost" onClick={props.onBackToHub}>Back to Bat-computer</button>
+      </div>
+      <p className="muted small">Re-lighting the signal launches a fresh adventure run — the score carries over.</p>
     </div>
   );
 }

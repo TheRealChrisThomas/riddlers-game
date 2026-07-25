@@ -205,6 +205,33 @@ export function HeroMascot(props: { role: HeroRole; mood?: HeroMood; size?: numb
   );
 }
 
+// --- Bat-Signal emblem (the classic sweptwing bat, projected in the light) ---
+// Rasterized from the classic Batman-logo ASCII, mirrored around center for symmetry.
+const BAT_EMBLEM_ROWS: string[] = [
+  '.......kkkk..........k.....k..........kkkk.......',
+  '.....kkkk............kkkkkkk............kkkk.....',
+  '...kkkkkk............kkkkkkk............kkkkkk...',
+  '..kkkkkkkkk.........kkkkkkkkk.........kkkkkkkkk..',
+  '.kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk.',
+  'kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk',
+  'kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk',
+  'kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk',
+  '.kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk.',
+  '..kkkkk.......kkkkkkkkkkkkkkkkkkkkk.......kkkkk..',
+  '....kkkk.......kkk....kkkkk....kkk.......kkkk....',
+  '.......kk.......k......kkk......k.......kk.......',
+];
+export function BatEmblem(props: { color?: string; size?: number; className?: string }) {
+  return (
+    <PixelSprite
+      rows={BAT_EMBLEM_ROWS}
+      palette={{ k: props.color ?? '#0a0a0a' }}
+      size={props.size ?? 120}
+      className={props.className}
+    />
+  );
+}
+
 // --- Bats (victory scatter) ---
 const BAT: Sprite = {
   palette: { k: '#0a0a0a' },

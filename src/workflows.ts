@@ -9,6 +9,8 @@ import {
 } from '@temporalio/workflow';
 import type * as activities from './activities';
 import {
+  BatcomputerArgs,
+  BatcomputerState,
   CHAMBER_SEQUENCE,
   CHAMBER_TITLES,
   ChamberArgs,
@@ -25,14 +27,20 @@ import {
   RiddleData,
   Role,
   ShellState,
+  VILLAIN_META,
+  VILLAINS,
+  Villain,
+  VillainStatus,
+  batSignal,
   chamberActionSignal,
+  getBatcomputerQuery,
   getChamberQuery,
   getShellQuery,
   joinSignal,
-  playAgainSignal,
   setRoleSignal,
-  startSignal,
 } from './shared';
+
+const ADVENTURE_SCORE = 100; // points banked for clearing a villain (placeholder; time-scale later)
 
 const { engageMechanism, disengageMechanism, overrideVault } = proxyActivities<typeof activities>({
   startToCloseTimeout: '10s',
@@ -49,15 +57,130 @@ const TAUNTS = [
 ];
 
 // ============================================================================
-// PARENT: the whole escape. Spawns one child workflow per chamber, in order,
+// GRANDPARENT: the Bat-computer. A long-lived, durable hub keyed on the case
+// code. It gathers the Bat-Family, waits for a Bat-Signal (a Temporal signal!)
+// naming a villain, launches that villain's adventure as a CHILD, banks the
+// outcome into a score that survives forever, then Continue-As-News so its
+// history stays bounded no matter how many adventures the team plays.
+// ============================================================================
+export async function batcomputerWorkflow(args: BatcomputerArgs): Promise<BatcomputerState> {
+  const players = new Map<string, Role>();
+  for (const p of args.seedRoster ?? []) players.set(p.operator, p.role);
+  const statuses: Record<Villain, VillainStatus> =
+    args.seedStatuses ?? { riddler: 'idle', twoface: 'idle', joker: 'idle', penguin: 'idle' };
+  let score = args.seedScore ?? 0;
+  const solved: Villain[] = [...(args.seedSolved ?? [])];
+  const round = args.round ?? 1;
+  // activeVillain / activeAdventureId track the running-OR-last adventure; both are carried
+  // across Continue-As-New so the win/lose screen survives the fresh run.
+  let activeVillain: Villain | null = args.activeVillain ?? null;
+  let activeAdventureId: string | null = args.activeAdventureId ?? null;
+  let pending: Villain | null = null; // a Bat-Signal waiting to be launched
+  let launching = false; // guards against a second signal firing during the same run
+  const log: string[] = args.seedLog ?? ['Bat-Computer online. Gather the Bat-Family, then light the signal.'];
+
+  const roster = (): Player[] => [...players].map(([operator, role]) => ({ operator, role }));
+  const state = (): BatcomputerState => ({
+    caseCode: args.caseCode,
+    roster: roster(),
+    statuses,
+    activeVillain,
+    activeAdventureId,
+    score,
+    solved,
+    round,
+    log,
+  });
+
+  setHandler(getBatcomputerQuery, state);
+  setHandler(joinSignal, (operator) => {
+    if (!players.has(operator)) {
+      const role = ROLES[players.size % ROLES.length]; // auto-assign, round-robin
+      players.set(operator, role);
+      log.push(`${operator} joins the Bat-Family as ${ROLE_LABEL[role]}.`);
+    }
+  });
+  setHandler(setRoleSignal, ({ operator, role }) => {
+    players.set(operator, role);
+    log.push(`${operator} takes the role of ${ROLE_LABEL[role]}.`);
+  });
+  // The Bat-Signal itself: a Temporal signal that names the villain to face.
+  setHandler(batSignal, (villain) => {
+    if (launching) return; // this run already committed to an adventure
+    if (!VILLAINS.includes(villain) || VILLAIN_META[villain].locked) {
+      log.push(`That case file is sealed. ${VILLAIN_META[villain]?.name ?? villain} is not ready.`);
+      return;
+    }
+    if (players.size === 0) {
+      log.push('Assemble the Bat-Family before you light the signal.');
+      return;
+    }
+    pending = villain;
+  });
+
+  // Wait (durably, indefinitely) for a Bat-Signal, then run exactly one adventure.
+  await condition(() => pending !== null);
+  const villain = pending!;
+  pending = null;
+  launching = true;
+  activeVillain = villain;
+  statuses[villain] = 'running';
+  activeAdventureId = `${args.caseCode}-${villain}-r${round}`;
+  log.push(`🦇 The Bat-Signal cuts the Gotham sky — ${VILLAIN_META[villain].name} answers the call.`);
+
+  const handle = await startChild(escapeWorkflow, {
+    workflowId: activeAdventureId,
+    args: [
+      {
+        villain,
+        caseCode: args.caseCode,
+        durationMs: args.durationMs,
+        reveal: args.reveal,
+        seedRoster: roster(),
+        autoStart: true,
+        round,
+      },
+    ],
+  });
+  const result = await handle.result(); // the adventure runs to a terminal state, then reports back
+
+  if (result.status === 'escaped') {
+    statuses[villain] = 'escaped';
+    score += ADVENTURE_SCORE;
+    if (!solved.includes(villain)) solved.push(villain);
+    log.push(`${VILLAIN_META[villain].name} defeated. +${ADVENTURE_SCORE} to the Bat-Family. Total: ${score}.`);
+  } else {
+    statuses[villain] = 'failed';
+    log.push(`${VILLAIN_META[villain].name} won this round. The case stays open.`);
+  }
+
+  // Continue-As-New: same caseCode (invite link unchanged), fresh history, everything
+  // that matters — team, score, record, last adventure — carried forward.
+  await continueAsNew<typeof batcomputerWorkflow>({
+    caseCode: args.caseCode,
+    durationMs: args.durationMs,
+    reveal: args.reveal,
+    seedRoster: roster(),
+    seedStatuses: statuses,
+    seedScore: score,
+    seedSolved: solved,
+    seedLog: log.slice(-12),
+    activeAdventureId, // keep the finished adventure so its win/lose screen still shows
+    activeVillain, // ditto — the villain that adventure belonged to
+    round: round + 1,
+  });
+  return state(); // unreachable; satisfies the type checker
+}
+
+// ============================================================================
+// PARENT (per adventure): spawns one child workflow per chamber, in order,
 // sharing a single absolute deadline. Escape = all chambers cleared in time.
+// Launched — seeded and auto-started — by the Bat-computer grandparent.
 // ============================================================================
 export async function escapeWorkflow(args: EscapeArgs): Promise<ShellState> {
   const players = new Map<string, Role>();
-  for (const p of args.seedRoster ?? []) players.set(p.operator, p.role); // rematch keeps the team
+  for (const p of args.seedRoster ?? []) players.set(p.operator, p.role); // seeded by the Bat-computer
   const round = args.round ?? 1;
-  let started = args.autoStart === true;
-  let playAgain = false;
   let status: ShellState['status'] = 'lobby';
   let deadlineEpochMs: number | null = null;
   let chamberIndex = 0;
@@ -88,25 +211,9 @@ export async function escapeWorkflow(args: EscapeArgs): Promise<ShellState> {
   };
 
   setHandler(getShellQuery, shell);
-  setHandler(joinSignal, (operator) => {
-    if (!players.has(operator)) {
-      const role = ROLES[players.size % ROLES.length]; // auto-assign, round-robin
-      players.set(operator, role);
-      log.push(`${operator} joins as ${ROLE_LABEL[role]}.`);
-    }
-  });
-  setHandler(setRoleSignal, ({ operator, role }) => {
-    players.set(operator, role);
-    log.push(`${operator} takes the role of ${ROLE_LABEL[role]}.`);
-  });
-  setHandler(startSignal, () => {
-    started = true;
-  });
-  setHandler(playAgainSignal, () => {
-    playAgain = true;
-  });
 
-  await condition(() => started && players.size > 0);
+  // Hub-launched: the roster is already seeded and the signal has been lit, so the
+  // clock starts immediately. (Role assembly + replay both live on the Bat-computer.)
   deadlineEpochMs = Date.now() + args.durationMs;
   status = 'in_chamber';
   log.push('Lockdown engaged. Three chambers stand between you and freedom.');
@@ -159,19 +266,8 @@ export async function escapeWorkflow(args: EscapeArgs): Promise<ShellState> {
     log.push('The final door slides open. The Bat-Family escapes into the Gotham night. 🦇');
   }
 
-  // Offer a rematch. Wait for a play-again signal, then Continue-As-New: same workflowId
-  // (case code / invite link unchanged), fresh event history, team carried over.
-  const rematch = await condition(() => playAgain, '15m');
-  if (rematch) {
-    await continueAsNew<typeof escapeWorkflow>({
-      caseCode: args.caseCode,
-      durationMs: args.durationMs,
-      reveal: args.reveal,
-      seedRoster: roster(),
-      autoStart: true,
-      round: round + 1,
-    });
-  }
+  // Report the terminal state up to the Bat-computer, which banks the score and
+  // owns replay (re-lighting the signal launches a fresh adventure run).
   return shell();
 }
 

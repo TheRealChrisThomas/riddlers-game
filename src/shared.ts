@@ -19,6 +19,55 @@ export interface Player {
   role: Role;
 }
 
+// ============================================================================
+// Villains — the Bat-computer's case files. Each is (or will be) its own
+// adventure workflow with a distinct Temporal concept as its headline lesson.
+// Only the Riddler is unlocked today; the rest are sealed case files.
+// ============================================================================
+export type Villain = 'riddler' | 'twoface' | 'joker' | 'penguin';
+export const VILLAINS: Villain[] = ['riddler', 'twoface', 'joker', 'penguin'];
+
+export interface VillainMeta {
+  id: Villain;
+  name: string;
+  tagline: string;
+  concept: string; // the Temporal primitive this adventure teaches
+  locked: boolean;
+}
+export const VILLAIN_META: Record<Villain, VillainMeta> = {
+  riddler: {
+    id: 'riddler',
+    name: 'The Riddler',
+    tagline: 'Three chambers. One clock.',
+    concept: 'Parent + child workflows · kill & recover',
+    locked: false,
+  },
+  twoface: {
+    id: 'twoface',
+    name: 'Two-Face',
+    tagline: 'Heads you live. Tails you die.',
+    concept: 'Determinism · side-effects',
+    locked: true,
+  },
+  joker: {
+    id: 'joker',
+    name: 'The Joker',
+    tagline: 'Chaos, with a punchline.',
+    concept: 'Retries · saga compensation',
+    locked: true,
+  },
+  penguin: {
+    id: 'penguin',
+    name: 'The Penguin',
+    tagline: 'A heist on a timer.',
+    concept: 'Durable timers · human-in-the-loop',
+    locked: true,
+  },
+};
+
+// Per-villain progress tracked by the Bat-computer (grandparent workflow).
+export type VillainStatus = 'idle' | 'running' | 'escaped' | 'failed';
+
 // --- Chambers ---
 export type ChamberType = 'riddle' | 'deathtrap' | 'escape';
 export const CHAMBER_SEQUENCE: ChamberType[] = ['riddle', 'deathtrap', 'escape'];
@@ -29,7 +78,44 @@ export const CHAMBER_TITLES: Record<ChamberType, string> = {
 };
 
 // ============================================================================
-// Parent workflow: escapeWorkflow (workflowId = case code)
+// Grandparent workflow: batcomputerWorkflow (workflowId = case code)
+// Owns the team roster + cross-adventure score; launches one villain
+// adventure at a time as a child, then Continue-As-News to stay alive with
+// bounded history. Per team-session — the score belongs to the invite code.
+// ============================================================================
+export interface BatcomputerState {
+  caseCode: string;
+  roster: Player[];
+  statuses: Record<Villain, VillainStatus>;
+  activeVillain: Villain | null;
+  activeAdventureId: string | null; // workflowId of the running/last adventure child
+  score: number; // persists across adventures and Continue-As-New
+  solved: Villain[];
+  round: number; // increments each Continue-As-New (keeps child workflowIds unique)
+  log: string[];
+}
+
+export interface BatcomputerArgs {
+  caseCode: string;
+  durationMs: number;
+  reveal?: boolean;
+  // carried across Continue-As-New so score/record/team survive:
+  seedRoster?: Player[];
+  seedStatuses?: Record<Villain, VillainStatus>;
+  seedScore?: number;
+  seedSolved?: Villain[];
+  seedLog?: string[];
+  activeAdventureId?: string | null;
+  activeVillain?: Villain | null; // carried so the win/lose screen survives Continue-As-New
+  round?: number;
+}
+
+export const batSignal = defineSignal<[Villain]>('batSignal');
+export const getBatcomputerQuery = defineQuery<BatcomputerState>('getBatcomputer');
+
+// ============================================================================
+// Parent workflow: adventureWorkflow (workflowId = <case>-<villain>-r<round>)
+// Launched as a child of the Bat-computer. Runs the villain's chambers.
 // ============================================================================
 export type EscapeStatus = 'lobby' | 'in_chamber' | 'escaped' | 'failed';
 
@@ -48,12 +134,13 @@ export interface ShellState {
 }
 
 export interface EscapeArgs {
+  villain: Villain; // which adventure this is (chamber content is Riddler-only for now)
   caseCode: string;
   durationMs: number;
   reveal?: boolean; // dev only: expose puzzle answers in queries
-  seedRoster?: Player[]; // carried across Continue-As-New so "play again" keeps the team
-  autoStart?: boolean; // skip the lobby on a rematch
-  round?: number; // increments each Continue-As-New (keeps child workflowIds unique)
+  seedRoster?: Player[]; // team seeded by the Bat-computer at launch
+  autoStart?: boolean; // hub-launched adventures skip the lobby
+  round?: number; // keeps child chamber workflowIds unique across replays
 }
 
 export const joinSignal = defineSignal<[string]>('join');

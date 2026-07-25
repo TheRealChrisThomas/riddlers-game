@@ -13,6 +13,77 @@ export interface Player {
   role: Role;
 }
 
+// --- Villains / Bat-computer (mirror of src/shared.ts) ---
+export type Villain = 'riddler' | 'twoface' | 'joker' | 'penguin';
+export const VILLAINS: Villain[] = ['riddler', 'twoface', 'joker', 'penguin'];
+
+export interface VillainMeta {
+  id: Villain;
+  name: string;
+  tagline: string;
+  concept: string;
+  locked: boolean;
+  glyph: string; // emoji shown on the case-file tile
+  intro: string; // taunt spoken when the Bat-Signal fires (client-side flourish)
+}
+export const VILLAIN_META: Record<Villain, VillainMeta> = {
+  riddler: {
+    id: 'riddler',
+    name: 'The Riddler',
+    tagline: 'Three chambers. One clock.',
+    concept: 'Parent + child workflows · kill & recover',
+    locked: false,
+    glyph: '?',
+    intro: 'Riddle me this, Bat-Family… can you escape my three chambers before the clock kills you all?',
+  },
+  twoface: {
+    id: 'twoface',
+    name: 'Two-Face',
+    tagline: 'Heads you live. Tails you die.',
+    concept: 'Determinism · side-effects',
+    locked: true,
+    glyph: '⚖',
+    intro: 'Let the coin decide, Bat-Family.',
+  },
+  joker: {
+    id: 'joker',
+    name: 'The Joker',
+    tagline: 'Chaos, with a punchline.',
+    concept: 'Retries · saga compensation',
+    locked: true,
+    glyph: '🃏',
+    intro: 'Why so serious?',
+  },
+  penguin: {
+    id: 'penguin',
+    name: 'The Penguin',
+    tagline: 'A heist on a timer.',
+    concept: 'Durable timers · human-in-the-loop',
+    locked: true,
+    glyph: '🐧',
+    intro: 'Right on schedule, Bat-Family. Waugh, waugh!',
+  },
+};
+
+export type VillainStatus = 'idle' | 'running' | 'escaped' | 'failed';
+
+export interface BatcomputerState {
+  caseCode: string;
+  roster: Player[];
+  statuses: Record<Villain, VillainStatus>;
+  activeVillain: Villain | null;
+  activeAdventureId: string | null;
+  score: number;
+  solved: Villain[];
+  round: number;
+  log: string[];
+}
+
+export interface HubResponse {
+  workerReachable: boolean;
+  hub: BatcomputerState;
+}
+
 export type ChamberType = 'riddle' | 'deathtrap' | 'escape';
 export type EscapeStatus = 'lobby' | 'in_chamber' | 'escaped' | 'failed';
 
@@ -83,7 +154,7 @@ export interface ChamberState {
 
 export interface ShellResponse {
   workerReachable: boolean;
-  shell: ShellState;
+  shell: ShellState | null; // null when no adventure is active on the Bat-computer
 }
 export interface ChamberResponse {
   workerReachable: boolean;
@@ -92,7 +163,7 @@ export interface ChamberResponse {
 
 export interface TraceEvent {
   t: number;
-  wf: 'case' | 'chamber';
+  wf: 'hub' | 'case' | 'chamber';
   kind: string;
   detail: string;
 }

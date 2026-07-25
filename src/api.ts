@@ -2,21 +2,24 @@ import cors from 'cors';
 import express from 'express';
 import { Connection, Client } from '@temporalio/client';
 import {
+  BatcomputerArgs,
+  BatcomputerState,
   ChamberState,
-  EscapeArgs,
   Role,
   ROLES,
   ShellState,
   TASK_QUEUE,
+  VILLAINS,
+  Villain,
+  batSignal,
   chamberActionSignal,
+  getBatcomputerQuery,
   getChamberQuery,
   getShellQuery,
   joinSignal,
-  playAgainSignal,
   setRoleSignal,
-  startSignal,
 } from './shared';
-import { escapeWorkflow } from './workflows';
+import { batcomputerWorkflow } from './workflows';
 
 const PORT = Number(process.env.PORT ?? 3001);
 const ADDRESS = process.env.TEMPORAL_ADDRESS ?? 'localhost:7233';
@@ -25,6 +28,7 @@ const isNotFound = (err: unknown) => err instanceof Error && err.name === 'Workf
 
 // Last successful reads per case, so a downed worker still serves a frozen board
 // (workerReachable:false) while the browser keeps its countdown ticking.
+const lastHub = new Map<string, BatcomputerState>();
 const lastShell = new Map<string, ShellState>();
 const lastChamber = new Map<string, ChamberState>();
 
@@ -49,28 +53,32 @@ async function main() {
   app.use(cors());
   app.use(express.json());
 
-  // --- create a case (start the parent workflow) ---
+  // --- create a case (start the Bat-computer grandparent workflow) ---
   app.post('/api/cases', async (req, res) => {
     const durationMinutes = clampInt(req.body?.durationMinutes, 1, 60, 12);
     const code = caseCode();
-    const args: EscapeArgs = {
+    const args: BatcomputerArgs = {
       caseCode: code,
       durationMs: durationMinutes * 60_000,
       reveal: process.env.REVEAL_CODE === '1', // dev flag
     };
-    await client.workflow.start(escapeWorkflow, { taskQueue: TASK_QUEUE, workflowId: code, args: [args] });
+    await client.workflow.start(batcomputerWorkflow, { taskQueue: TASK_QUEUE, workflowId: code, args: [args] });
     res.json({ code });
   });
 
-  // --- lobby signals (all go to the parent) ---
+  // --- hub signals (all go to the Bat-computer, keyed on the case code) ---
   app.post('/api/cases/:code/join', (req, res) => signalParent(req, res, joinSignal, str(req.body?.operator)));
-  app.post('/api/cases/:code/start', (req, res) => signalParent(req, res, startSignal, undefined));
-  app.post('/api/cases/:code/replay', (req, res) => signalParent(req, res, playAgainSignal, undefined));
   app.post('/api/cases/:code/role', (req, res) => {
     const operator = str(req.body?.operator);
     const role = req.body?.role as Role;
     if (!operator || !ROLES.includes(role)) return res.status(400).json({ error: 'operator and valid role required' });
     return signalParent(req, res, setRoleSignal, { operator, role });
+  });
+  // The Bat-Signal: name a villain, launch that adventure. Replay re-lights the same signal.
+  app.post('/api/cases/:code/batsignal', (req, res) => {
+    const villain = str(req.body?.villain) as Villain;
+    if (!VILLAINS.includes(villain)) return res.status(400).json({ error: 'valid villain required' });
+    return signalParent(req, res, batSignal, villain);
   });
 
   async function signalParent(
@@ -89,15 +97,32 @@ async function main() {
     }
   }
 
-  // --- parent shell state ---
-  app.get('/api/cases/:code/shell', async (req, res) => {
+  // --- Bat-computer hub state (grandparent) ---
+  app.get('/api/cases/:code/hub', async (req, res) => {
     const code = req.params.code;
     try {
-      const shell = await withTimeout(client.workflow.getHandle(code).query(getShellQuery), 2000);
+      const hub = await withTimeout(client.workflow.getHandle(code).query(getBatcomputerQuery), 2000);
+      lastHub.set(code, hub);
+      res.json({ workerReachable: true, hub });
+    } catch (err) {
+      if (isNotFound(err)) return res.status(404).json({ error: 'case not found' });
+      const cached = lastHub.get(code);
+      if (cached) return res.json({ workerReachable: false, hub: cached });
+      res.status(503).json({ workerReachable: false, error: 'worker unreachable and no cached state' });
+    }
+  });
+
+  // --- active adventure shell state (the child launched by the Bat-computer) ---
+  app.get('/api/cases/:code/shell', async (req, res) => {
+    const code = req.params.code;
+    const advId = await activeAdventureId(code);
+    if (!advId) return res.json({ workerReachable: true, shell: null });
+    try {
+      const shell = await withTimeout(client.workflow.getHandle(advId).query(getShellQuery), 2000);
       lastShell.set(code, shell);
       res.json({ workerReachable: true, shell });
     } catch (err) {
-      if (isNotFound(err)) return res.status(404).json({ error: 'case not found' });
+      if (isNotFound(err)) return res.json({ workerReachable: true, shell: null });
       const cached = lastShell.get(code);
       if (cached) return res.json({ workerReachable: false, shell: cached });
       res.status(503).json({ workerReachable: false, error: 'worker unreachable and no cached state' });
@@ -147,23 +172,33 @@ async function main() {
     }
   });
 
-  // --- live workflow trace: digested event history of the parent + active child ---
+  // --- live workflow trace: digested history across all three levels ---
+  // Bat-computer (hub) → active adventure (case) → active chamber (chamber).
   app.get('/api/cases/:code/trace', async (req, res) => {
     const code = req.params.code;
     try {
       const items: TraceItem[] = [];
-      const parentHist = await withTimeout(client.workflow.getHandle(code).fetchHistory(), 3000);
-      collectEvents(parentHist, 'case', items);
-      const activeId = await activeChamberId(code);
-      if (activeId) {
+      const hubHist = await withTimeout(client.workflow.getHandle(code).fetchHistory(), 3000);
+      collectEvents(hubHist, 'hub', items);
+      const advId = await activeAdventureId(code);
+      if (advId) {
         try {
-          const childHist = await withTimeout(client.workflow.getHandle(activeId).fetchHistory(), 3000);
-          collectEvents(childHist, 'chamber', items);
+          const advHist = await withTimeout(client.workflow.getHandle(advId).fetchHistory(), 3000);
+          collectEvents(advHist, 'case', items);
         } catch {
-          /* child may be mid-transition */
+          /* adventure may be mid-transition */
         }
-        // Live retries live in the pending-activity state, not in history — surface them.
-        await collectPendingActivities(client, activeId, items);
+        const chamberId = await activeChamberId(code);
+        if (chamberId) {
+          try {
+            const childHist = await withTimeout(client.workflow.getHandle(chamberId).fetchHistory(), 3000);
+            collectEvents(childHist, 'chamber', items);
+          } catch {
+            /* child may be mid-transition */
+          }
+          // Live retries live in the pending-activity state, not in history — surface them.
+          await collectPendingActivities(client, chamberId, items);
+        }
       }
       items.sort((a, b) => a.t - b.t);
       res.json({ events: items.slice(-60) });
@@ -173,11 +208,24 @@ async function main() {
     }
   });
 
-  // Resolve the active child workflowId from the parent. Query fresh so we never target a
-  // just-completed chamber; fall back to cache only when the worker is unreachable.
-  async function activeChamberId(code: string): Promise<string | null> {
+  // Resolve the active adventure workflowId from the Bat-computer grandparent.
+  async function activeAdventureId(code: string): Promise<string | null> {
     try {
-      const shell = await withTimeout(client.workflow.getHandle(code).query(getShellQuery), 2000);
+      const hub = await withTimeout(client.workflow.getHandle(code).query(getBatcomputerQuery), 2000);
+      lastHub.set(code, hub);
+      return hub.activeAdventureId;
+    } catch {
+      return lastHub.get(code)?.activeAdventureId ?? null;
+    }
+  }
+
+  // Resolve the active chamber (grandchild) via the active adventure. Query fresh so we never
+  // target a just-completed chamber; fall back to cache only when the worker is unreachable.
+  async function activeChamberId(code: string): Promise<string | null> {
+    const advId = await activeAdventureId(code);
+    if (!advId) return null;
+    try {
+      const shell = await withTimeout(client.workflow.getHandle(advId).query(getShellQuery), 2000);
       lastShell.set(code, shell);
       return shell.activeChamberId;
     } catch {
@@ -191,7 +239,7 @@ async function main() {
 // --- workflow-history → readable trace ---
 interface TraceItem {
   t: number;
-  wf: 'case' | 'chamber';
+  wf: 'hub' | 'case' | 'chamber';
   kind: string;
   detail: string;
 }
@@ -240,7 +288,7 @@ function describeEvent(e: any): { kind: string; detail: string } | null {
   }
 }
 
-function collectEvents(hist: any, wf: 'case' | 'chamber', out: TraceItem[]) {
+function collectEvents(hist: any, wf: 'hub' | 'case' | 'chamber', out: TraceItem[]) {
   for (const e of hist?.events ?? []) {
     const d = describeEvent(e);
     if (d) out.push({ t: eventMs(e), wf, kind: d.kind, detail: d.detail });
