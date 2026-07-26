@@ -1,13 +1,39 @@
-# 🦇 The Riddler's Game — a co-op escape room on [Temporal](https://temporal.io)
+# 🦇 The Durable Knight — a co-op Batman escape room on [Temporal](https://temporal.io)
 
-[![CI](https://github.com/TheRealChrisThomas/riddlers-game/actions/workflows/ci.yml/badge.svg)](https://github.com/TheRealChrisThomas/riddlers-game/actions/workflows/ci.yml)
+[![CI](https://github.com/TheRealChrisThomas/durable-knight/actions/workflows/ci.yml/badge.svg)](https://github.com/TheRealChrisThomas/durable-knight/actions/workflows/ci.yml)
 
-The Bat-Family is trapped in three of the Riddler's chambers. Clear all three together
-before the clock runs out. It's a game — but every mechanic is a Temporal primitive, so
-it doubles as a hands-on tour of durable execution.
+Boot the Bat-computer, assemble the Bat-Family, and light the signal on a villain. One case
+file is open: the Riddler has your team locked in three chambers on a single clock. It's a
+game — but every mechanic is a Temporal primitive, so it doubles as a hands-on tour of
+durable execution.
 
 The headline moment: **kill the worker mid-game and the whole case survives** — timer,
 chamber progress, and all — because Temporal replays it from event history.
+
+---
+
+## How a session goes
+
+1. **Open a case.** You get a five-letter code. Hit *INVITE* and send the link — up to four
+   players join the same case.
+2. **Pick your operative.** Batman, Robin, Nightwing or Oracle. Roles matter: the Deathtrap
+   gates each wire to a specific hero.
+3. **Light the Bat-Signal** on a case file. Your hero answers the call, and the adventure
+   starts as its own workflow.
+4. **Clear three chambers on one clock** — crack the code, disarm the trap, override the vault
+   and hold the exit together.
+5. **Win or lose, it's banked.** The Bat-computer keeps the score and the record, then
+   Continue-As-News — same invite link, fresh history. Light the signal again.
+
+The Bat-computer is the hub you keep coming back to. Each villain is a separate case file, and
+each one is (or will be) its own workflow teaching a different Temporal concept:
+
+| Case file | Status | What it teaches |
+| --------- | ------ | --------------- |
+| **The Riddler** — three chambers, one clock | open | Parent + child workflows · kill & recover |
+| **Two-Face** — heads you live, tails you die | sealed | Determinism · side-effects |
+| **The Joker** — chaos, with a punchline | sealed | Retries · saga compensation |
+| **The Penguin** — a heist on a timer | sealed | Durable timers · human-in-the-loop |
 
 ---
 
@@ -72,7 +98,7 @@ npm run web        # http://localhost:5173
 
 Or `npm run dev` runs worker + API + web together (Temporal stays separate via `npm run temporal`).
 
-**Play co-op:** create a case, hit *copy invite link*, send it to friends. Everyone picks a
+**Play co-op:** create a case, hit *INVITE*, send the link to friends. Everyone picks a
 Bat-Family role — roles matter (the Deathtrap gates each wire to a specific hero). The
 puzzles scale from 1 to 4 players. State is shared through the workflow itself: player
 actions are signals, and every client polls the same case — no database, no locks.
