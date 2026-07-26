@@ -90,6 +90,13 @@ npm run test:watch
 npm run typecheck # server + web
 ```
 
+> **Changing dependencies?** Use `npm run lock`, not a bare `npm install`. rollup,
+> esbuild and `@swc/core` ship their native code as per-platform optional deps, and npm
+> only records the platform it is run on ([npm/cli#4828](https://github.com/npm/cli/issues/4828))
+> — so a lockfile written on a Mac makes `npm ci` on Linux CI install a rollup with no
+> binary. `npm run lock` regenerates both lockfiles with every platform included;
+> `npm run check:lock` verifies it, and CI runs that check before installing anything.
+
 No Docker, no running Temporal, nothing to start first — the workflow tests boot Temporal's
 **time-skipping test server** themselves (downloaded and cached on first run). When every
 workflow is parked on a timer the server jumps the clock instead of waiting, so a 12-minute

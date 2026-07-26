@@ -83,6 +83,7 @@ jobs:
           cache: npm
           cache-dependency-path: package-lock.json
 
+      - run: node scripts/check-lockfiles.mjs
       - run: npm ci
 
       - name: Cache the Temporal test server

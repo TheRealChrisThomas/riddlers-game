@@ -47,6 +47,13 @@ jobs:
             package-lock.json
             web/package-lock.json
 
+      # rollup/esbuild/@swc ship native code as per-platform optional deps, and
+      # npm only records the host's (npm/cli#4828). A lockfile written on a Mac
+      # installs a rollup with no Linux binary — so check before the install
+      # rather than reading a stack trace three minutes from now.
+      - name: Check the lockfiles carry Linux binaries
+        run: node scripts/check-lockfiles.mjs
+
       # `npm ci` (not `install`) — installs exactly what the lockfile says and
       # fails if package.json and the lockfile disagree. That's what you want
       # in CI; `npm install` would silently update the lockfile.

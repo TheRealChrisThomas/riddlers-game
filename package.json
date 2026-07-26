@@ -16,7 +16,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p web/tsconfig.json",
-    "build:web": "npm --prefix web run build"
+    "build:web": "npm --prefix web run build",
+    "lock": "node scripts/relock.mjs",
+    "check:lock": "node scripts/check-lockfiles.mjs"
   },
   "dependencies": {
     "@temporalio/client": "^1.21.0",
