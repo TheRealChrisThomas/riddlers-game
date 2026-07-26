@@ -1,0 +1,80 @@
+# ============================================================================
+# CI — runs on every push to main and every pull request.
+#
+# Annotated throughout, because this repo is a teaching demo: if you have not
+# written Actions before, this file is a reasonable one to read top to bottom.
+# ============================================================================
+name: CI
+
+# WHEN this runs. `push` is filtered to main so feature branches don't get
+# double runs (the pull_request trigger already covers them).
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Only one CI run per branch at a time. Pushing twice in quick succession
+# cancels the older run instead of queueing it — saves minutes and gives you
+# the answer for the commit you actually care about.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: this workflow only ever reads the repository.
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: typecheck · build · test
+    runs-on: ubuntu-latest
+    # Belt and braces: a hung Temporal test server shouldn't burn 6 hours.
+    timeout-minutes: 15
+
+    steps:
+      # Puts the repo on disk at $GITHUB_WORKSPACE.
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      # `cache: npm` caches ~/.npm keyed on the lockfiles below. This repo has
+      # two packages (root + web), so both lockfiles feed the cache key.
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            web/package-lock.json
+
+      # `npm ci` (not `install`) — installs exactly what the lockfile says and
+      # fails if package.json and the lockfile disagree. That's what you want
+      # in CI; `npm install` would silently update the lockfile.
+      - name: Install dependencies
+        run: |
+          npm ci
+          npm --prefix web ci
+
+      # Both tsconfigs: the server (src/) and the web app (web/src/). Since
+      # web/src/types.ts re-exports src/protocol.ts, a protocol change that
+      # breaks one side is caught here.
+      - name: Typecheck (server + web)
+        run: npm run typecheck
+
+      - name: Build the web app
+        run: npm run build:web
+
+      # The workflow tests download Temporal's time-skipping test server
+      # (~30MB) into $TMPDIR on first run. Caching it keyed on the lockfile
+      # means we only re-download when the SDK version changes. Optional —
+      # delete this step and the tests still pass, just a bit slower.
+      - name: Cache the Temporal test server
+        uses: actions/cache@v4
+        with:
+          path: /tmp/temporal-test-server-sdk-typescript-*
+          key: temporal-test-server-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+      # Vitest: activity tests plus workflow tests against the test server.
+      # No services needed — the test server is started by the tests.
+      - name: Run tests
+        run: npm test

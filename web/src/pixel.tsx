@@ -241,7 +241,7 @@ const BAT: Sprite = {
 export function VictoryBats() {
   const bats = Array.from({ length: 16 });
   return (
-    <div className="bats" aria-hidden>
+    <div className="layer bats" aria-hidden>
       {bats.map((_, i) => {
         const style: CSSProperties = {
           left: `${(i * 53) % 100}%`,

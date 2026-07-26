@@ -4,11 +4,16 @@ import { Connection, Client } from '@temporalio/client';
 import {
   BatcomputerArgs,
   BatcomputerState,
+  ChamberResponse,
   ChamberState,
+  HubResponse,
   Role,
   ROLES,
+  ShellResponse,
   ShellState,
   TASK_QUEUE,
+  TraceEvent,
+  TraceResponse,
   VILLAINS,
   Villain,
   batSignal,
@@ -103,11 +108,11 @@ async function main() {
     try {
       const hub = await withTimeout(client.workflow.getHandle(code).query(getBatcomputerQuery), 2000);
       lastHub.set(code, hub);
-      res.json({ workerReachable: true, hub });
+      res.json({ workerReachable: true, hub } satisfies HubResponse);
     } catch (err) {
       if (isNotFound(err)) return res.status(404).json({ error: 'case not found' });
       const cached = lastHub.get(code);
-      if (cached) return res.json({ workerReachable: false, hub: cached });
+      if (cached) return res.json({ workerReachable: false, hub: cached } satisfies HubResponse);
       res.status(503).json({ workerReachable: false, error: 'worker unreachable and no cached state' });
     }
   });
@@ -116,15 +121,15 @@ async function main() {
   app.get('/api/cases/:code/shell', async (req, res) => {
     const code = req.params.code;
     const advId = await activeAdventureId(code);
-    if (!advId) return res.json({ workerReachable: true, shell: null });
+    if (!advId) return res.json({ workerReachable: true, shell: null } satisfies ShellResponse);
     try {
       const shell = await withTimeout(client.workflow.getHandle(advId).query(getShellQuery), 2000);
       lastShell.set(code, shell);
-      res.json({ workerReachable: true, shell });
+      res.json({ workerReachable: true, shell } satisfies ShellResponse);
     } catch (err) {
-      if (isNotFound(err)) return res.json({ workerReachable: true, shell: null });
+      if (isNotFound(err)) return res.json({ workerReachable: true, shell: null } satisfies ShellResponse);
       const cached = lastShell.get(code);
-      if (cached) return res.json({ workerReachable: false, shell: cached });
+      if (cached) return res.json({ workerReachable: false, shell: cached } satisfies ShellResponse);
       res.status(503).json({ workerReachable: false, error: 'worker unreachable and no cached state' });
     }
   });
@@ -133,7 +138,7 @@ async function main() {
   app.get('/api/cases/:code/chamber', async (req, res) => {
     const code = req.params.code;
     const activeId = await activeChamberId(code);
-    if (!activeId) return res.json({ workerReachable: true, chamber: null });
+    if (!activeId) return res.json({ workerReachable: true, chamber: null } satisfies ChamberResponse);
     try {
       const chamber = await withTimeout(client.workflow.getHandle(activeId).query(getChamberQuery), 2000);
       // Sync the vault fight to Temporal's real retries: inject the live attempt number.
@@ -142,11 +147,11 @@ async function main() {
         if (attempt) chamber.data.attempt = attempt;
       }
       lastChamber.set(code, chamber);
-      res.json({ workerReachable: true, chamber });
+      res.json({ workerReachable: true, chamber } satisfies ChamberResponse);
     } catch (err) {
-      if (isNotFound(err)) return res.json({ workerReachable: true, chamber: null });
+      if (isNotFound(err)) return res.json({ workerReachable: true, chamber: null } satisfies ChamberResponse);
       const cached = lastChamber.get(code);
-      if (cached) return res.json({ workerReachable: false, chamber: cached });
+      if (cached) return res.json({ workerReachable: false, chamber: cached } satisfies ChamberResponse);
       res.status(503).json({ workerReachable: false, error: 'worker unreachable and no cached chamber' });
     }
   });
@@ -177,7 +182,7 @@ async function main() {
   app.get('/api/cases/:code/trace', async (req, res) => {
     const code = req.params.code;
     try {
-      const items: TraceItem[] = [];
+      const items: TraceEvent[] = [];
       const hubHist = await withTimeout(client.workflow.getHandle(code).fetchHistory(), 3000);
       collectEvents(hubHist, 'hub', items);
       const advId = await activeAdventureId(code);
@@ -201,10 +206,10 @@ async function main() {
         }
       }
       items.sort((a, b) => a.t - b.t);
-      res.json({ events: items.slice(-60) });
+      res.json({ events: items.slice(-60) } satisfies TraceResponse);
     } catch (err) {
       if (isNotFound(err)) return res.status(404).json({ error: 'case not found' });
-      res.json({ events: [] });
+      res.json({ events: [] } satisfies TraceResponse);
     }
   });
 
@@ -237,13 +242,6 @@ async function main() {
 }
 
 // --- workflow-history → readable trace ---
-interface TraceItem {
-  t: number;
-  wf: 'hub' | 'case' | 'chamber';
-  kind: string;
-  detail: string;
-}
-
 function eventMs(e: any): number {
   const s = e?.eventTime?.seconds;
   const n = e?.eventTime?.nanos ?? 0;
@@ -288,7 +286,7 @@ function describeEvent(e: any): { kind: string; detail: string } | null {
   }
 }
 
-function collectEvents(hist: any, wf: 'hub' | 'case' | 'chamber', out: TraceItem[]) {
+function collectEvents(hist: any, wf: 'hub' | 'case' | 'chamber', out: TraceEvent[]) {
   for (const e of hist?.events ?? []) {
     const d = describeEvent(e);
     if (d) out.push({ t: eventMs(e), wf, kind: d.kind, detail: d.detail });
@@ -309,7 +307,7 @@ async function overrideAttempt(client: Client, workflowId: string): Promise<numb
   return undefined;
 }
 
-async function collectPendingActivities(client: Client, workflowId: string, out: TraceItem[]) {
+async function collectPendingActivities(client: Client, workflowId: string, out: TraceEvent[]) {
   try {
     const desc: any = await withTimeout(
       client.workflowService.describeWorkflowExecution({ namespace: 'default', execution: { workflowId } }),

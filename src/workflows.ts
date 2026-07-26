@@ -126,7 +126,7 @@ export async function batcomputerWorkflow(args: BatcomputerArgs): Promise<Batcom
   activeVillain = villain;
   statuses[villain] = 'running';
   activeAdventureId = `${args.caseCode}-${villain}-r${round}`;
-  log.push(`🦇 The Bat-Signal cuts the Gotham sky — ${VILLAIN_META[villain].name} answers the call.`);
+  log.push(`🦇 The Bat-Signal cuts the Gotham sky — the Bat-Family answers the call. Target: ${VILLAIN_META[villain].name}.`);
 
   const handle = await startChild(escapeWorkflow, {
     workflowId: activeAdventureId,

@@ -1,5 +1,15 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from 'react';
 import { Ambient } from './Ambient';
+import { BootTerminal } from './Boot';
 import { BatEmblem, HeroMascot, Riddler, RoleAvatar, VictoryBats, type HeroMood, type RiddlerMood } from './pixel';
 import {
   BatcomputerState,
@@ -8,6 +18,7 @@ import {
   ChamberType,
   DeathtrapData,
   EscapeData,
+  HERO_VOW,
   HubResponse,
   RiddleData,
   Role,
@@ -23,9 +34,25 @@ import {
 } from './types';
 
 const POLL_MS = 1000;
+const LINK_GRACE = 3; // consecutive poll failures tolerated before we say so out loud
 
-// The Riddler's taunt when you enter each chamber (shown as a pop-up dialog).
-const RIDDLER: Record<ChamberType, string> = {
+// Mutations are fired without awaiting, so this is where their failures surface.
+// The hub and each case provide their own reporter, which renders as a banner.
+const FailureReporter = createContext<(msg: string) => void>(() => {});
+const useReportFailure = () => useContext(FailureReporter);
+const send = (req: Promise<unknown>, report: (msg: string) => void) => {
+  req.catch((e: unknown) => {
+    // 409 means the chamber moved on before the click landed — normal in co-op
+    // play and not worth a banner.
+    if (e instanceof ApiError && e.status === 409) return;
+    report(e instanceof Error ? e.message : String(e));
+  });
+};
+
+// Chamber-entry taunts, shown as a pop-up dialog. Riddler-specific: the other
+// three villains are locked, and when one opens it needs its own set (keyed by
+// villain), not a reuse of these.
+const RIDDLER_CHAMBER_TAUNTS: Record<ChamberType, string> = {
   riddle:
     "Riddle me this, Bat-Family… a four-digit truth, each digit one to six. Guess, and I'll tell you how close you dance to death.",
   deathtrap:
@@ -41,12 +68,32 @@ const RIDDLER_CONCEDE =
   'No… NO! My perfect puzzle — solved?! Enjoy the night, Bat-Family. But every riddle you answer only makes the next one deadlier…';
 
 // --- API helpers ---
-const post = (path: string, body?: unknown) =>
-  fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body ?? {}) });
+class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+  }
+}
+
+// Every mutation goes through post(), so a non-2xx has to reject: the API answers
+// with { error } and a silently-ignored 503 looks exactly like nothing happening.
+async function post(path: string, body?: unknown) {
+  const r = await fetch(path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body ?? {}),
+  });
+  if (!r.ok) {
+    const detail = (await r.json().catch(() => null)) as { error?: string } | null;
+    throw new ApiError(detail?.error ?? `request failed (${r.status})`, r.status);
+  }
+  return r;
+}
 
 async function createCase(durationMinutes: number): Promise<string> {
   const r = await post('/api/cases', { durationMinutes });
-  if (!r.ok) throw new Error('could not create case');
   return (await r.json()).code as string;
 }
 const joinCase = (code: string, operator: string) => post(`/api/cases/${code}/join`, { operator });
@@ -197,7 +244,8 @@ function Case(props: { code: string; operator: string; villain: Villain; onBackT
   const [shellResp, setShellResp] = useState<ShellResponse | null>(null);
   const [chamberResp, setChamberResp] = useState<ChamberResponse | null>(null);
   const [now, setNow] = useState(Date.now());
-  const [fatal, setFatal] = useState('');
+  const [linkError, setLinkError] = useState(''); // last poll failure, cleared on recovery
+  const [actionError, setActionError] = useState(''); // a mutation that didn't land
   const [dialog, setDialog] = useState<string | null>(null); // chamber intros → center modal
   const [bubble, setBubble] = useState<string | null>(null); // timed taunts → speech bubble
   const [showTrace, setShowTrace] = useState(localStorage.getItem('showTrace') === '1');
@@ -207,6 +255,7 @@ function Case(props: { code: string; operator: string; villain: Villain; onBackT
   const bubbleTimer = useRef(0);
   const prevChamber = useRef(0);
   const busy = useRef(false);
+  const failures = useRef(0);
 
   const toggleTrace = () => {
     setShowTrace((v) => {
@@ -223,7 +272,7 @@ function Case(props: { code: string; operator: string; villain: Villain; onBackT
       const key = `c${s.chamberIndex}`;
       if (key !== shownDialog.current) {
         shownDialog.current = key;
-        setDialog(RIDDLER[s.chamberType]);
+        setDialog(RIDDLER_CHAMBER_TAUNTS[s.chamberType]);
       }
     } else if (s.status === 'failed' && shownDialog.current !== 'defeat') {
       shownDialog.current = 'defeat';
@@ -271,15 +320,20 @@ function Case(props: { code: string; operator: string; villain: Villain; onBackT
       busy.current = true;
       try {
         const s = await getShell(code);
-        if (alive && s) {
+        if (!s) throw new Error('worker unreachable and nothing cached');
+        if (alive) {
           setShellResp(s);
           if (s.shell?.status === 'in_chamber') {
             const c = await getChamber(code);
             if (alive && c) setChamberResp(c);
           }
         }
+        // Recovered: the next poll heals the screen on its own.
+        failures.current = 0;
+        if (alive) setLinkError('');
       } catch (e) {
-        if (alive) setFatal(String((e as Error).message));
+        failures.current += 1;
+        if (alive && failures.current >= LINK_GRACE) setLinkError((e as Error).message);
       } finally {
         busy.current = false;
       }
@@ -297,8 +351,17 @@ function Case(props: { code: string; operator: string; villain: Villain; onBackT
     return () => clearInterval(id);
   }, []);
 
-  if (fatal) return <Centered><p className="error">{fatal}</p><button className="ghost" onClick={onBackToHub}>Back to Bat-computer</button></Centered>;
-  if (!shellResp || !shellResp.shell) return <Centered><p className="tagline">Entering the {VILLAIN_META[villain].name} case…</p></Centered>;
+  // Nothing to show yet and the link is down — keep retrying, the poll self-heals.
+  if ((!shellResp || !shellResp.shell) && linkError)
+    return (
+      <Centered>
+        <p className="error">Lost the link to the case — {linkError}</p>
+        <p className="tagline">Still trying. The workflow keeps running without us.</p>
+        <button className="ghost" onClick={onBackToHub}>Back to Bat-computer</button>
+      </Centered>
+    );
+  if (!shellResp || !shellResp.shell)
+    return <Centered><p className="tagline">Entering {VILLAIN_META[villain].name}'s case…</p></Centered>;
 
   const shell = shellResp.shell;
   const workerDown = !shellResp.workerReachable || (chamberResp ? !chamberResp.workerReachable : false);
@@ -329,16 +392,17 @@ function Case(props: { code: string; operator: string; villain: Villain; onBackT
   const danger = shell.status === 'in_chamber' && remainingMs < 30_000;
 
   return (
+    <FailureReporter.Provider value={setActionError}>
     <div className={`shell room${showTrace ? ' trace-open' : ''}`}>
       {dialog && <RiddlerDialog message={dialog} onClose={() => setDialog(null)} />}
-      {danger && <div className="danger-pulse" aria-hidden />}
+      {danger && <div className="layer danger-pulse" aria-hidden />}
       {shell.status === 'escaped' && <VictoryBats />}
-      <div className="mascot">
+      <div className="layer mascot">
         {bubble && <div className="speech" onClick={() => setBubble(null)}>{bubble}</div>}
         <Riddler mood={mascotMood} size={112} />
       </div>
       {myHero && (
-        <div className="mascot mascot-right">
+        <div className="layer mascot mascot-right">
           <HeroMascot role={myHero} mood={heroMood} size={112} />
         </div>
       )}
@@ -349,8 +413,24 @@ function Case(props: { code: string; operator: string; villain: Villain; onBackT
           pick up exactly where it left off. That's Temporal's durable execution.
         </div>
       )}
+      {linkError && (
+        <div className="banner banner-warn">
+          ⚠ Link lost — showing the last known board. Retrying… <span className="banner-detail">{linkError}</span>
+        </div>
+      )}
+      {actionError && (
+        <button className="banner banner-warn banner-dismiss" onClick={() => setActionError('')}>
+          ⚠ That didn't reach the workflow: <span className="banner-detail">{actionError}</span> — dismiss
+        </button>
+      )}
 
-      <TopBar code={code} villainLabel={VILLAIN_META[villain].name} onBack={onBackToHub} showTrace={showTrace} onToggleTrace={toggleTrace} />
+      <ConsoleBar
+        code={code}
+        label={VILLAIN_META[villain].name}
+        onBack={onBackToHub}
+        showTrace={showTrace}
+        onToggleTrace={toggleTrace}
+      />
 
       {shell.status === 'in_chamber' && (
         <>
@@ -369,7 +449,7 @@ function Case(props: { code: string; operator: string; villain: Villain; onBackT
           onReplay={() => {
             shownDialog.current = ''; // let chamber dialogs fire again
             lastTaunt.current = 0;
-            batSignalReq(code, villain); // re-light the signal → a fresh adventure run
+            send(batSignalReq(code, villain), setActionError); // re-light the signal → a fresh run
           }}
           onBackToHub={onBackToHub}
         />
@@ -377,12 +457,13 @@ function Case(props: { code: string; operator: string; villain: Villain; onBackT
 
       <LogFeed lines={shell.log} />
     </div>
+    </FailureReporter.Provider>
   );
 }
 
 function RiddlerDialog(props: { message: string; onClose: () => void }) {
   return (
-    <div className="modal-overlay" onClick={props.onClose}>
+    <div className="layer modal-overlay" onClick={props.onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <div className="riddler-head">
           <Riddler mood="cackle" size={64} />
@@ -403,20 +484,62 @@ function Centered(props: { children: ReactNode }) {
   );
 }
 
-function TopBar(props: { code: string; villainLabel: string; onBack: () => void; showTrace: boolean; onToggleTrace: () => void }) {
-  const shareUrl = `${location.origin}/?case=${props.code}`;
+// One console strip for both the hub and a case: identity on the left, live
+// readouts and actions on the right. Actions are chips rather than underlined
+// links so the destructive one (LEAVE) reads differently from the toggles.
+function ConsoleBar(props: {
+  code: string;
+  label: string; // BAT-COMPUTER at the hub, the villain inside a case
+  onBack?: () => void;
+  linkUp?: boolean;
+  score?: number;
+  showTrace: boolean;
+  onToggleTrace: () => void;
+  onLeave?: () => void;
+}) {
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return;
+    const t = setTimeout(() => setCopied(false), 1500);
+    return () => clearTimeout(t);
+  }, [copied]);
+
+  const copyInvite = () => {
+    navigator.clipboard?.writeText(`${location.origin}/?case=${props.code}`);
+    setCopied(true);
+  };
+
   return (
-    <div className="topbar">
-      <div>
-        <button className="link" onClick={props.onBack}>◂ Bat-computer</button>
-        <span className="muted"> · CASE</span> <strong className="code">{props.code}</strong>
-        <span className="muted"> · {props.villainLabel}</span>
-        <button className="link" onClick={() => navigator.clipboard?.writeText(shareUrl)}>copy invite link</button>
+    <div className="console-bar">
+      <div className="cb-id">
+        {props.onBack && (
+          <button className="cb-chip cb-back" onClick={props.onBack}>◂ BAT-COMPUTER</button>
+        )}
+        <span className="cb-label">{props.label}</span>
+        <span className="cb-case">
+          <span className="cb-key">CASE</span>
+          <strong className="code">{props.code}</strong>
+        </span>
       </div>
-      <div>
-        <button className={`link ${props.showTrace ? 'on' : ''}`} onClick={props.onToggleTrace}>
-          {props.showTrace ? '● workflow' : '○ workflow'}
+
+      <div className="cb-actions">
+        {props.linkUp !== undefined && (
+          <span className={`cb-readout ${props.linkUp ? 'up' : 'down'}`} title={props.linkUp ? 'Temporal worker reachable' : 'Temporal worker unreachable'}>
+            {props.linkUp ? '● LINK' : '○ NO LINK'}
+          </span>
+        )}
+        {props.score !== undefined && <span className="cb-readout cb-score">SCORE {props.score}</span>}
+        <button className={`cb-chip ${copied ? 'ok' : ''}`} onClick={copyInvite}>
+          {copied ? 'COPIED ✓' : 'INVITE'}
         </button>
+        <button
+          className={`cb-chip ${props.showTrace ? 'on' : ''}`}
+          onClick={props.onToggleTrace}
+          title="Live Temporal workflow trace"
+        >
+          WORKFLOW
+        </button>
+        {props.onLeave && <button className="cb-chip cb-leave" onClick={props.onLeave}>LEAVE</button>}
       </div>
     </div>
   );
@@ -456,7 +579,7 @@ function TracePanel(props: { code: string; onClose: () => void }) {
     <div className="trace">
       <div className="trace-head">
         <span>⚙ TEMPORAL — live workflow trace</span>
-        <button className="link" onClick={props.onClose}>hide</button>
+        <button className="cb-chip" onClick={props.onClose}>HIDE</button>
       </div>
       <div className="trace-body">
         {events.length === 0 && <div className="trace-empty">Waiting for workflow events…</div>}
@@ -480,12 +603,26 @@ function TracePanel(props: { code: string; onClose: () => void }) {
 function Batcomputer(props: { code: string; operator: string; onLogout: () => void }) {
   const { code, operator, onLogout } = props;
   const [hubResp, setHubResp] = useState<HubResponse | null>(null);
-  const [fatal, setFatal] = useState('');
+  const [linkError, setLinkError] = useState(''); // last poll failure, cleared on recovery
+  const [actionError, setActionError] = useState(''); // a mutation that didn't land
   const [dismissedAdv, setDismissedAdv] = useState<string | null>(null);
   const [signalling, setSignalling] = useState<Villain | null>(null);
   const [showTrace, setShowTrace] = useState(localStorage.getItem('showTrace') === '1');
   const joined = useRef(false);
   const busy = useRef(false);
+  const failures = useRef(0);
+
+  // The boot sequence plays once per case per browser session — you shouldn't
+  // sit through it again after leaving and coming back mid-demo.
+  const bootKey = `boot:${code}`;
+  const [booting, setBooting] = useState(() => sessionStorage.getItem(bootKey) !== '1');
+  // Reveal stage: 0 nothing, 1 operative select, 2 case files too. A returning
+  // player (boot already seen) gets everything at once.
+  const [stage, setStage] = useState(() => (sessionStorage.getItem(bootKey) === '1' ? 2 : 0));
+  const endBoot = useCallback(() => {
+    sessionStorage.setItem(bootKey, '1');
+    setBooting(false);
+  }, [bootKey]);
 
   const toggleTrace = () =>
     setShowTrace((v) => {
@@ -505,9 +642,14 @@ function Batcomputer(props: { code: string; operator: string; onLogout: () => vo
           joined.current = true;
         }
         const h = await getHub(code);
-        if (alive && h) setHubResp(h);
+        if (!h) throw new Error('worker unreachable and nothing cached');
+        if (alive) setHubResp(h);
+        // Recovered: the next poll heals the screen on its own.
+        failures.current = 0;
+        if (alive) setLinkError('');
       } catch (e) {
-        if (alive) setFatal(String((e as Error).message));
+        failures.current += 1;
+        if (alive && failures.current >= LINK_GRACE) setLinkError((e as Error).message);
       } finally {
         busy.current = false;
       }
@@ -520,10 +662,31 @@ function Batcomputer(props: { code: string; operator: string; onLogout: () => vo
     };
   }, [code, operator]);
 
-  if (fatal)
+  // A teammate already lit the signal → don't hold this player in the boot.
+  useEffect(() => {
+    if (booting && hubResp?.hub.activeAdventureId) endBoot();
+  }, [booting, hubResp, endBoot]);
+
+  // Once the boot clears, the hub assembles itself: operatives, then case files.
+  useEffect(() => {
+    if (booting || stage >= 2) return;
+    const a = setTimeout(() => setStage(1), 120);
+    const b = setTimeout(() => setStage(2), 1150);
+    return () => {
+      clearTimeout(a);
+      clearTimeout(b);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [booting]);
+
+  // The boot terminal covers the first poll, so there's no spinner to see.
+  if (booting) return <BootTerminal code={code} operator={operator} onDone={endBoot} />;
+  // Nothing to show yet and the link is down — keep retrying, the poll self-heals.
+  if (!hubResp && linkError)
     return (
       <Centered>
-        <p className="error">{fatal}</p>
+        <p className="error">Can't reach the Bat-computer — {linkError}</p>
+        <p className="tagline">Still trying. Check the worker and the API are up.</p>
         <button className="ghost" onClick={onLogout}>Back</button>
       </Centered>
     );
@@ -548,34 +711,43 @@ function Batcomputer(props: { code: string; operator: string; onLogout: () => vo
   };
 
   return (
+    <FailureReporter.Provider value={setActionError}>
     <div className="shell room hub">
       {signalling && (
         <BatSignal
           villain={signalling}
+          role={me?.role ?? 'batman'}
           onDone={() => {
-            batSignalReq(code, signalling);
+            send(batSignalReq(code, signalling), setActionError);
             setSignalling(null);
           }}
         />
       )}
       {showTrace && <TracePanel code={code} onClose={toggleTrace} />}
+      <div className="layer hub-crt" aria-hidden />
 
-      <div className="topbar">
-        <div>
-          <span className="muted">BAT-COMPUTER · CASE</span> <strong className="code">{code}</strong>
-          <button className="link" onClick={() => navigator.clipboard?.writeText(`${location.origin}/?case=${code}`)}>copy invite link</button>
+      <ConsoleBar
+        code={code}
+        label="BAT-COMPUTER"
+        linkUp={hubResp.workerReachable}
+        score={hub.score}
+        showTrace={showTrace}
+        onToggleTrace={toggleTrace}
+        onLeave={onLogout}
+      />
+      {linkError && (
+        <div className="banner banner-warn">
+          ⚠ Link lost — showing the last known state. Retrying… <span className="banner-detail">{linkError}</span>
         </div>
-        <div>
-          <span className="hub-score">SCORE {hub.score}</span>
-          <button className={`link ${showTrace ? 'on' : ''}`} onClick={toggleTrace}>
-            {showTrace ? '● workflow' : '○ workflow'}
-          </button>
-          <button className="link" onClick={onLogout}>leave</button>
-        </div>
-      </div>
+      )}
+      {actionError && (
+        <button className="banner banner-warn banner-dismiss" onClick={() => setActionError('')}>
+          ⚠ That didn't reach the workflow: <span className="banner-detail">{actionError}</span> — dismiss
+        </button>
+      )}
 
-      <div className="card staging">
-        <h2>Assemble the Bat-Family</h2>
+      <div className={`card staging term ${stage >= 1 ? 'boot-in' : 'stage-hidden'}`}>
+        <h2 className="term-head">Select your operative</h2>
         <p className="muted">Pick your role, then light the signal on a case file. Share the code to bring in your team.</p>
         <div className="roster">
           {hub.roster.map((p) => (
@@ -593,7 +765,7 @@ function Batcomputer(props: { code: string; operator: string; onLogout: () => vo
             <button
               key={r}
               className={`rolebtn role-${r} ${me?.role === r ? 'active' : ''}`}
-              onClick={() => setRoleReq(code, operator, r)}
+              onClick={() => send(setRoleReq(code, operator, r), setActionError)}
             >
               {ROLE_LABEL[r]}
             </button>
@@ -601,8 +773,8 @@ function Batcomputer(props: { code: string; operator: string; onLogout: () => vo
         </div>
       </div>
 
-      <div className="card casefiles">
-        <h2>Case files</h2>
+      <div className={`card casefiles term ${stage >= 2 ? 'boot-in' : 'stage-hidden'}`}>
+        <h2 className="term-head">Case files</h2>
         <p className="muted">Each villain is its own Temporal workflow. Light the signal to begin.</p>
         <div className="villain-grid">
           {VILLAINS.map((v) => (
@@ -618,8 +790,9 @@ function Batcomputer(props: { code: string; operator: string; onLogout: () => vo
         {!canLaunch && <p className="hint">Assemble at least one hero before you can light the signal.</p>}
       </div>
 
-      <LogFeed lines={hub.log} />
+      {stage >= 2 && <LogFeed lines={hub.log} terminal />}
     </div>
+    </FailureReporter.Provider>
   );
 }
 
@@ -649,17 +822,21 @@ function VillainTile(props: { villain: Villain; status: VillainStatus; canLaunch
 }
 
 // The Bat-Signal: a searchlight beam throws a glowing disc of light onto the Gotham
-// night sky with the black bat emblem projected inside it, then the villain answers
-// and the real Temporal signal is sent (see onDone). Pure client-side flourish.
-function BatSignal(props: { villain: Villain; onDone: () => void }) {
+// night sky with the black bat emblem projected inside it, the hero answers the call
+// and vows to end it, then the real Temporal signal is sent (see onDone).
+// Pure client-side flourish.
+const callsign = (name: string) => name.replace(/^The /, ''); // "The Riddler" → "Riddler"
+
+function BatSignal(props: { villain: Villain; role: Role; onDone: () => void }) {
   const meta = VILLAIN_META[props.villain];
+  const vow = HERO_VOW[props.role].replace('{villain}', callsign(meta.name));
   useEffect(() => {
     const t = setTimeout(props.onDone, 3200);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   return (
-    <div className="batsignal-overlay" aria-hidden>
+    <div className="layer batsignal-overlay" aria-hidden>
       <div className="batsignal-sky" />
       <div className="batsignal-beam" />
       <div className="batsignal-signal">
@@ -667,8 +844,12 @@ function BatSignal(props: { villain: Villain; onDone: () => void }) {
         <BatEmblem color="#0a0d07" size={200} className="batsignal-bat" />
       </div>
       <div className="batsignal-caption">
-        <div className="batsignal-name">{meta.name} answers the signal</div>
-        <div className="batsignal-taunt">“{meta.intro}”</div>
+        <div className="batsignal-hero">
+          <RoleAvatar role={props.role} size={40} />
+          <div className="batsignal-name">{ROLE_LABEL[props.role]} answers the call</div>
+        </div>
+        <div className="batsignal-vow">“{vow}”</div>
+        <div className="batsignal-case">CASE FILE · {meta.name.toUpperCase()} — {meta.tagline}</div>
       </div>
     </div>
   );
@@ -709,10 +890,11 @@ function Chamber(props: { code: string; operator: string; shell: ShellState; cha
 // --- Chamber 1: riddle / code cracker ---
 function RiddleChamber(props: { code: string; operator: string; data: RiddleData }) {
   const { code, operator, data } = props;
+  const report = useReportFailure();
   const [digits, setDigits] = useState<number[]>([]);
   const submit = () => {
     if (digits.length !== data.codeLength) return;
-    chamberAction(code, operator, 'guess', digits);
+    send(chamberAction(code, operator, 'guess', digits), report);
     setDigits([]);
   };
   return (
@@ -759,6 +941,7 @@ function RiddleChamber(props: { code: string; operator: string; data: RiddleData
 // --- Chamber 2: deathtrap / saga — cut each wire in-rhythm; a miss surges (compensation) ---
 function DeathtrapChamber(props: { code: string; operator: string; shell: ShellState; data: DeathtrapData }) {
   const { code, operator, shell, data } = props;
+  const report = useReportFailure();
   const myRole = shell.roster.find((p) => p.operator === operator)?.role;
   const partyRoles = new Set(shell.roster.map((p) => p.role));
 
@@ -821,10 +1004,10 @@ function DeathtrapChamber(props: { code: string; operator: string; shell: ShellS
             periodMs={periodMs}
             onResult={(hit) => {
               if (hit) {
-                chamberAction(code, operator, 'disarm', current.id);
+                send(chamberAction(code, operator, 'disarm', current.id), report);
                 setOptimistic(displayIndex + 1);
               } else {
-                chamberAction(code, operator, 'surge');
+                send(chamberAction(code, operator, 'surge'), report);
                 setOptimistic(null);
               }
             }}
@@ -898,7 +1081,11 @@ function TimingBar(props: { label: string; zoneWidth: number; periodMs: number; 
 // --- Chamber 3: final escape / retries + co-op hold ---
 function EscapeChamber(props: { code: string; operator: string; data: EscapeData }) {
   const { code, operator, data } = props;
-  const hold = useCallback((on: boolean) => chamberAction(code, operator, 'hold', on), [code, operator]);
+  const report = useReportFailure();
+  const hold = useCallback(
+    (on: boolean) => send(chamberAction(code, operator, 'hold', on), report),
+    [code, operator, report],
+  );
 
   return (
     <div className="chamber">
@@ -912,7 +1099,7 @@ function EscapeChamber(props: { code: string; operator: string; data: EscapeData
                   <span key={i} className="vkey dim" />
                 ))}
               </div>
-              <button className="primary big" onClick={() => chamberAction(code, operator, 'reboot')}>
+              <button className="primary big" onClick={() => send(chamberAction(code, operator, 'reboot'), report)}>
                 ⚡ Initiate override
               </button>
             </div>
@@ -1076,9 +1263,10 @@ function EndScreen(props: { won: boolean; onReplay: () => void; onBackToHub: () 
   );
 }
 
-function LogFeed(props: { lines: string[] }) {
+function LogFeed(props: { lines: string[]; terminal?: boolean }) {
   return (
-    <div className="log">
+    <div className={`log ${props.terminal ? 'log-term boot-in' : ''}`}>
+      {props.terminal && <div className="log-head">SYSTEM LOG</div>}
       {props.lines.slice(-8).map((line, i) => (
         <div key={i}>{line}</div>
       ))}

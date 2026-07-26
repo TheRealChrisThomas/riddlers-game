@@ -48,7 +48,6 @@ button:disabled { opacity: 0.45; cursor: default; }
 .primary { width: 100%; background: var(--riddler); color: #04120a; border: none; font-weight: 800; letter-spacing: 1px; }
 .primary.big { padding: 20px; font-size: 18px; }
 .ghost { width: 100%; }
-.link { border: none; color: var(--muted); text-decoration: underline; padding: 0 8px; background: none; }
 .error { color: var(--danger); margin-top: 12px; }
 .muted { color: var(--muted); }
 .alert { color: var(--amber); text-align: center; }
@@ -56,8 +55,15 @@ button:disabled { opacity: 0.45; cursor: default; }
 /* --- Case shell --- */
 .room { justify-content: flex-start; padding-top: 26px; }
 .room > * { width: 100%; max-width: 640px; }
+/* Fixed-position overlays sit inside .room, so they must opt out of the column
+   width above — otherwise they anchor to a 640px box on the left edge. Any
+   full-screen layer added later needs this class; that is the whole contract. */
+.room > .layer { width: auto; max-width: none; }
 .banner { background: rgba(255,176,32,0.12); border: 1px solid var(--amber); color: var(--amber); border-radius: 10px; padding: 14px 16px; line-height: 1.5; font-size: 14px; }
-.topbar { display: flex; justify-content: space-between; align-items: center; color: var(--muted); }
+/* Transient link/action failures: tighter and redder than the teaching banner */
+.banner-warn { background: rgba(255,77,77,0.1); border-color: rgba(255,77,77,0.45); color: #ff9b9b; padding: 10px 14px; font-size: 13px; }
+.banner-detail { color: var(--muted); }
+.banner-dismiss { display: block; text-align: left; cursor: pointer; }
 .code { letter-spacing: 4px; color: var(--riddler); }
 
 /* --- Progress + clock --- */
@@ -231,7 +237,6 @@ button:disabled { opacity: 0.45; cursor: default; }
 .hint { color: var(--muted); font-size: 13px; text-align: center; max-width: 320px; margin: 0; }
 
 /* Live Temporal trace panel */
-.topbar .link.on { color: var(--riddler); }
 .trace {
   position: fixed;
   top: 0;
@@ -287,7 +292,7 @@ button:disabled { opacity: 0.45; cursor: default; }
 @keyframes slump { to { transform: translateY(8%) rotate(-7deg); } }
 
 /* corner mascots in a case */
-.mascot { position: fixed; left: 16px; bottom: 12px; z-index: 30; pointer-events: none; width: auto; max-width: none; }
+.mascot { position: fixed; left: 16px; bottom: 12px; z-index: 30; pointer-events: none; }
 .mascot::after { content: ''; position: absolute; left: 50%; bottom: 4px; width: 76%; height: 10px; transform: translateX(-50%); background: radial-gradient(ellipse, rgba(70,227,90,0.35), transparent 70%); }
 /* Riddler taunt speech bubble (over the mascot) */
 .speech {
@@ -406,7 +411,6 @@ button:disabled { opacity: 0.45; cursor: default; }
    Bat-computer hub: score bar, roster, villain case-file tiles, Bat-Signal
    ============================================================================ */
 .hub { gap: 18px; }
-.hub-score { color: var(--bat); font-weight: 800; letter-spacing: 1px; margin-right: 14px; text-shadow: 0 0 12px rgba(245,197,24,0.4); }
 
 .casefiles h2 { margin-top: 0; }
 .villain-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin-top: 12px; }
@@ -484,8 +488,11 @@ button:disabled { opacity: 0.45; cursor: default; }
   filter: drop-shadow(0 0 3px rgba(0,0,0,0.6));
 }
 .batsignal-caption { position: relative; text-align: center; margin-top: 26px; max-width: 540px; padding: 0 20px; animation: fade 0.6s ease 1.1s both; }
-.batsignal-name { color: var(--bat); font-weight: 800; letter-spacing: 3px; font-size: 15px; text-shadow: 0 0 14px rgba(245,197,24,0.5); }
-.batsignal-taunt { color: var(--text); font-size: 19px; margin-top: 10px; line-height: 1.45; }
+.batsignal-hero { display: flex; align-items: center; justify-content: center; gap: 10px; }
+.batsignal-name { color: var(--bat); font-weight: 800; letter-spacing: 3px; font-size: 15px; text-transform: uppercase; text-shadow: 0 0 14px rgba(245,197,24,0.5); }
+/* the hero's vow lands a beat after the signal steadies */
+.batsignal-vow { color: var(--text); font-size: 21px; font-weight: 600; margin-top: 12px; line-height: 1.4; animation: fade 0.5s ease 0.6s both; }
+.batsignal-case { color: var(--muted); font-size: 11px; letter-spacing: 2px; margin-top: 14px; }
 
 /* the lamp flicks on, steadies, then the beam holds */
 @keyframes beamignite {
@@ -502,4 +509,129 @@ button:disabled { opacity: 0.45; cursor: default; }
   26% { opacity: 1; transform: scale(1.06); }
   40% { transform: scale(1); }
   100% { opacity: 1; transform: scale(1); }
+}
+
+/* ============================================================================
+   Bat-computer boot terminal + CRT hub chrome. The app-wide scanlines live on
+   .crt-overlay (see Ambient); the boot screen sits above that layer, so it
+   carries its own. The hub only adds a phosphor vignette — a second scanline
+   layer there would moiré against the first.
+   ============================================================================ */
+.boot {
+  position: fixed; inset: 0; z-index: 80; padding: 24px;
+  display: flex; align-items: center; justify-content: center;
+  background: radial-gradient(70% 60% at 50% 40%, #0b1621 0%, #05080d 68%, #03050a 100%);
+}
+.boot-crt {
+  position: absolute; inset: 0; pointer-events: none;
+  background:
+    repeating-linear-gradient(180deg, rgba(110,168,255,0.055) 0 1px, transparent 1px 3px),
+    radial-gradient(125% 100% at 50% 50%, transparent 42%, rgba(0,0,0,0.8) 100%);
+  animation: crtflick 5s steps(1, end) infinite;
+}
+/* Sized to its own content (not a fixed column) so the text block lands on the
+   true centre of the screen rather than the centre of an over-wide box. The bezel
+   gives the eye a symmetric frame to judge — left-aligned text inside a centred
+   box reads as off-centre without one. */
+.boot-screen {
+  position: relative; max-width: 100%; padding: 34px 40px 30px;
+  border: 1px solid #1c2c3c; border-radius: 14px;
+  background: linear-gradient(180deg, rgba(10,18,26,0.72), rgba(5,9,14,0.72));
+  box-shadow: inset 0 0 70px rgba(110,168,255,0.06), 0 24px 70px rgba(0,0,0,0.55);
+  animation: poweron 0.55s ease both;
+}
+.boot-out {
+  margin: 0; font: inherit; font-size: 14px; line-height: 1.9; white-space: pre-wrap;
+  color: var(--batman); text-shadow: 0 0 10px rgba(110,168,255,0.35);
+}
+.boot-out .off { visibility: hidden; } /* holds layout width without showing */
+.boot-title { color: var(--bat); font-weight: 800; letter-spacing: 3px; font-size: 16px; text-shadow: 0 0 16px rgba(245,197,24,0.45); }
+.boot-sub { color: var(--muted); letter-spacing: 1.5px; font-size: 12px; text-shadow: none; }
+.boot-welcome { color: var(--text); font-weight: 700; font-size: 17px; letter-spacing: 1.5px; text-shadow: 0 0 12px rgba(215,226,234,0.25); }
+.boot-status { font-weight: 700; }
+.boot-status.tone-ok { color: var(--riddler); text-shadow: 0 0 10px rgba(70,227,90,0.4); }
+.boot-status.tone-bat { color: var(--bat); text-shadow: 0 0 10px rgba(245,197,24,0.45); }
+.boot-caret { display: inline-block; width: 8px; height: 14px; margin-left: 3px; vertical-align: -2px; background: var(--batman); animation: blink 0.9s steps(1, end) infinite; }
+
+.boot-prompt { display: flex; flex-direction: column; align-items: center; gap: 9px; margin-top: 28px; }
+.boot-begin {
+  border: 1px solid var(--bat); color: var(--bat); background: rgba(245,197,24,0.06);
+  font-weight: 800; letter-spacing: 2px; padding: 13px 22px;
+  opacity: 0; transition: opacity 0.45s ease, background 0.2s ease;
+}
+.boot-begin:disabled { opacity: 0; } /* out-specifies the global button:disabled dimming */
+.boot-prompt.ready .boot-begin { opacity: 1; animation: beginglow 1.6s ease-in-out infinite; }
+.boot-begin:hover { background: rgba(245,197,24,0.18); }
+.boot-hint { color: var(--muted); font-size: 11px; letter-spacing: 1.5px; }
+
+/* the tube warms up, then the picture steadies */
+@keyframes poweron {
+  0% { opacity: 0; transform: scaleY(0.004); filter: brightness(3); }
+  35% { opacity: 1; transform: scaleY(0.02); filter: brightness(2.2); }
+  60% { transform: scaleY(1); filter: brightness(1.3); }
+  100% { opacity: 1; transform: scaleY(1); filter: brightness(1); }
+}
+@keyframes crtflick { 0%, 100% { opacity: 1; } 48% { opacity: 0.94; } 50% { opacity: 0.82; } 52% { opacity: 0.96; } }
+@keyframes blink { 50% { opacity: 0; } }
+@keyframes beginglow {
+  0%, 100% { box-shadow: 0 0 0 rgba(245,197,24,0); }
+  50% { box-shadow: 0 0 22px rgba(245,197,24,0.35); }
+}
+
+/* --- The hub reads as the same machine the boot ran on --- */
+.hub-crt {
+  position: fixed; inset: 0; z-index: 4; pointer-events: none;
+  background: radial-gradient(130% 100% at 50% 42%, rgba(110,168,255,0.05) 0%, transparent 45%, rgba(0,0,0,0.5) 100%);
+}
+
+/* --- Console bar: the status strip above the hub and every chamber --- */
+.console-bar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; }
+.cb-id, .cb-actions { display: flex; align-items: center; gap: 9px; min-width: 0; flex-wrap: wrap; }
+.cb-label { color: var(--batman); font-size: 12px; font-weight: 800; letter-spacing: 2px; text-transform: uppercase; white-space: nowrap; }
+.cb-case { display: inline-flex; align-items: baseline; gap: 7px; }
+.cb-key { color: var(--muted); font-size: 10px; letter-spacing: 2px; }
+.cb-case .code { font-size: 14px; }
+.cb-readout { font-size: 11px; letter-spacing: 1.5px; white-space: nowrap; }
+.cb-readout.up { color: var(--riddler); }
+.cb-readout.down { color: var(--danger); animation: blink 1.2s steps(1, end) infinite; }
+.cb-score { color: var(--bat); font-weight: 800; text-shadow: 0 0 12px rgba(245,197,24,0.35); }
+
+.cb-chip {
+  padding: 6px 10px; border-radius: 6px; border: 1px solid var(--line);
+  background: rgba(255,255,255,0.02); color: var(--muted);
+  font-size: 11px; font-weight: 700; letter-spacing: 1.5px; white-space: nowrap;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+.cb-chip:hover { color: var(--text); border-color: #33475a; background: rgba(255,255,255,0.05); }
+.cb-chip.on { color: var(--bat); border-color: rgba(245,197,24,0.5); background: rgba(245,197,24,0.07); }
+.cb-chip.ok { color: var(--riddler); border-color: rgba(70,227,90,0.5); background: rgba(70,227,90,0.08); }
+.cb-back { color: var(--batman); border-color: rgba(110,168,255,0.3); }
+.cb-back:hover { color: var(--batman); border-color: var(--batman); background: rgba(110,168,255,0.1); }
+.cb-leave:hover { color: var(--danger); border-color: rgba(255,77,77,0.45); background: rgba(255,77,77,0.08); }
+
+.card.term {
+  border-color: #1b2a38;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.6), inset 0 0 46px rgba(110,168,255,0.045);
+}
+.term-head {
+  margin: 0 0 8px; font-size: 13px; font-weight: 800; letter-spacing: 2.5px; text-transform: uppercase;
+  color: var(--batman); text-shadow: 0 0 12px rgba(110,168,255,0.35);
+}
+.term-head::before { content: '> '; color: var(--bat); }
+
+/* Staged reveal: each panel wipes down like a screen redraw */
+.stage-hidden { opacity: 0; transform: translateY(16px); pointer-events: none; }
+.boot-in { animation: bootin 0.5s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+@keyframes bootin {
+  0% { opacity: 0; transform: translateY(14px); clip-path: inset(0 0 100% 0); filter: brightness(1.5); }
+  55% { opacity: 1; }
+  100% { opacity: 1; transform: translateY(0); clip-path: inset(0 0 0 0); filter: brightness(1); }
+}
+
+.log-term { background: #060a0f; border-color: #1b2a38; color: #8fb1cc; box-shadow: inset 0 0 30px rgba(110,168,255,0.05); }
+.log-head { color: var(--batman); font-size: 10px; letter-spacing: 2.5px; opacity: 0.75; border-bottom: 1px solid #16232e; padding-bottom: 6px; margin-bottom: 8px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .boot-screen, .boot-crt, .boot-in, .boot-prompt.ready .boot-begin, .cb-readout.down, .boot-caret { animation: none; }
+  .boot-screen { opacity: 1; transform: none; filter: none; }
 }

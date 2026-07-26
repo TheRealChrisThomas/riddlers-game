@@ -1,5 +1,7 @@
 # 🦇 The Riddler's Game — a co-op escape room on [Temporal](https://temporal.io)
 
+[![CI](https://github.com/TheRealChrisThomas/riddlers-game/actions/workflows/ci.yml/badge.svg)](https://github.com/TheRealChrisThomas/riddlers-game/actions/workflows/ci.yml)
+
 The Bat-Family is trapped in three of the Riddler's chambers. Clear all three together
 before the clock runs out. It's a game — but every mechanic is a Temporal primitive, so
 it doubles as a hands-on tour of durable execution.
@@ -12,13 +14,16 @@ chamber progress, and all — because Temporal replays it from event history.
 ## How the escape maps onto Temporal
 
 ```
-escapeWorkflow  (parent, workflowId = case code)      ← roster, the shared deadline, timed taunts
-│   spawns one child workflow per chamber, in order
-├─► child  #r1c1  The Riddle Lock    → Signals in / Query out (workflow holds a secret code)
-├─► child  #r1c2  The Deathtrap      → Saga + compensation (a miss re-arms your last wire)
-└─► child  #r1c3  The Final Escape   → Activity retries + backoff, then a co-op hold
-        ESCAPE = all three children cleared before the shared deadline
-        "Play again" → Continue-As-New (same case code, fresh history, round #r2…)
+batcomputerWorkflow  (grandparent, workflowId = case code)   ← roster, score, case files
+│   waits durably for a Bat-Signal — a signal naming a villain — then launches
+└─► escapeWorkflow  (parent, CODE-riddler-r1)                ← shared deadline, timed taunts
+    │   spawns one child workflow per chamber, in order
+    ├─► child  CODE#r1c1  The Riddle Lock    → Signals in / Query out (the workflow holds the code)
+    ├─► child  CODE#r1c2  The Deathtrap      → Saga + compensation (a miss re-arms your last wire)
+    └─► child  CODE#r1c3  The Final Escape   → Activity retries + backoff, then a co-op hold
+            ESCAPE = all three children cleared before the shared deadline
+            outcome banked into the score, then the hub Continue-As-News
+            (same case code so the invite link never changes, fresh history, round r2…)
 ```
 
 | Chamber | Temporal primitive | The puzzle |
@@ -77,11 +82,44 @@ riddle answer + an autofill button, so you can skip the Mastermind grind while t
 
 ---
 
+## Tests
+
+```bash
+npm test          # everything, ~15s
+npm run test:watch
+npm run typecheck # server + web
+```
+
+No Docker, no running Temporal, nothing to start first — the workflow tests boot Temporal's
+**time-skipping test server** themselves (downloaded and cached on first run). When every
+workflow is parked on a timer the server jumps the clock instead of waiting, so a 12-minute
+case deadline and the vault's retry backoff both resolve in milliseconds. The whole suite,
+including a full three-chamber win, runs in about fifteen seconds.
+
+What's covered:
+
+| Test | What would break without it |
+| ---- | --------------------------- |
+| Riddle lock: solve, near-miss scoring, deadline | Signal/query round-trip; ●/○ feedback; the chamber giving up on time |
+| Deathtrap: in-order disarm, out-of-order cut | Saga compensation rewinding **one** wire — and the room still being solvable after |
+| Vault: override + hold | Temporal retrying the flaky activity (asserts it took 4 attempts) |
+| Bat-computer: seed args, sealed case files | Continue-As-New restoring team/score/record; locked villains staying locked |
+| Bat-computer: a won case, end to end | Score banking and Continue-As-New across the whole grandparent → parent → child chain |
+
+> **Apple Silicon:** Temporal's time-skipping test server is an x86 binary and needs Rosetta 2
+> (`softwareupdate --install-rosetta`). CI runs on x86 Linux, so this only affects local runs.
+
+Two GitHub Actions workflows, both annotated line by line if you're learning Actions:
+`ci.yml` (typecheck, build, test on push + PR) and `pr-checks.yml` (a Node matrix, path-based
+job skipping, job outputs, and a run summary).
+
+---
+
 ## Watch the workflows
 
 Two ways to see the Temporal execution as you play:
 
-- **In-app** — flip the **○ workflow** toggle in the top bar. A side panel streams a digested
+- **In-app** — flip the **WORKFLOW** chip in the console bar. A side panel streams a digested
   live trace of the parent + active child: signals landing, durable timers, child chambers
   spawning, the vault activity **retrying with backoff**, and continue-as-new. (History comes
   from `fetchHistory()`; live retries come from `describeWorkflowExecution`'s pending-activity
@@ -93,5 +131,7 @@ Two ways to see the Temporal execution as you play:
 ---
 
 Built as a learning project. The Temporal code is small and heavily commented —
-`src/workflows.ts` is the place to start reading. Batman/Riddler are DC trademarks; this is a
+`src/workflows.ts` is the place to start reading. `src/protocol.ts` is the one definition of
+every shape crossing the wire; the web app re-exports it rather than keeping its own copy, so
+the browser and the worker can't drift apart. Batman/Riddler are DC trademarks; this is a
 non-commercial fan homage.

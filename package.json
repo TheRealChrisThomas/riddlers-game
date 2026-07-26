@@ -4,7 +4,7 @@
   "private": true,
   "license": "MIT",
   "author": "Chris Thomas",
-  "description": "The Riddler's Game — a co-op escape room built on Temporal. Each case is a durable parent workflow, each chamber a child workflow; player actions are signals and the shared board is a query.",
+  "description": "The Riddler's Game \u2014 a co-op escape room built on Temporal. Each case is a durable parent workflow, each chamber a child workflow; player actions are signals and the shared board is a query.",
   "scripts": {
     "temporal": "docker compose up",
     "worker": "tsx watch src/worker.ts",
@@ -12,7 +12,11 @@
     "api:reveal": "REVEAL_CODE=1 tsx watch src/api.ts",
     "backend": "concurrently -n worker,api -c cyan,magenta \"npm:worker\" \"npm:api\"",
     "web": "npm --prefix web run dev",
-    "dev": "concurrently -n worker,api,web -c cyan,magenta,green \"npm:worker\" \"npm:api\" \"npm:web\""
+    "dev": "concurrently -n worker,api,web -c cyan,magenta,green \"npm:worker\" \"npm:api\" \"npm:web\"",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p web/tsconfig.json",
+    "build:web": "npm --prefix web run build"
   },
   "dependencies": {
     "@temporalio/client": "^1.21.0",
@@ -22,11 +26,13 @@
     "express": "^4.19.2"
   },
   "devDependencies": {
+    "@temporalio/testing": "^1.21.1",
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
     "@types/node": "^22.10.0",
     "concurrently": "^9.1.0",
     "tsx": "^4.19.2",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.10"
   }
 }
