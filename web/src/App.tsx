@@ -198,7 +198,8 @@ function Lobby(props: {
     <div className="shell">
       <div className="card">
         <h1 className="logo">
-          <span className="q">?</span> BATMAN ADVENTURES
+          <BatEmblem color="var(--bat)" size={54} className="logo-bat" />
+          THE DURABLE KNIGHT
         </h1>
         <p className="tagline">
           Co-op escape rooms running on Temporal. Boot the Bat-computer, gather the Bat-Family, and light the

@@ -1,10 +1,10 @@
 {
-  "name": "riddlers-game",
+  "name": "durable-knight",
   "version": "0.1.0",
   "private": true,
   "license": "MIT",
   "author": "Chris Thomas",
-  "description": "The Riddler's Game \u2014 a co-op escape room built on Temporal. Each case is a durable parent workflow, each chamber a child workflow; player actions are signals and the shared board is a query.",
+  "description": "The Durable Knight \u2014 a co-op Batman escape room built on Temporal. The Bat-computer is a long-lived hub workflow; each case is a child adventure and each chamber a child of that. Player actions are signals, the shared board is a query, and killing the worker mid-case proves the point.",
   "scripts": {
     "temporal": "docker compose up",
     "worker": "tsx watch src/worker.ts",

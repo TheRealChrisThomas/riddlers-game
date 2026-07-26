@@ -31,7 +31,10 @@ body {
 .card { width: 100%; max-width: 640px; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 28px; box-shadow: 0 20px 60px rgba(0,0,0,0.6); }
 
 .logo { margin: 0 0 8px; letter-spacing: 4px; font-size: 28px; display: flex; align-items: center; gap: 12px; }
-.logo .q { color: var(--riddler); font-size: 40px; text-shadow: 0 0 18px rgba(70,227,90,0.6); transform: rotate(-8deg); }
+/* The mark is the bat, not the Riddler's question mark — he's one case file of four.
+   The source sprite is 49x12, i.e. very wide and flat, so it gets lifted taller the
+   same way the projected emblem does (see .batsignal-bat). */
+.logo-bat { flex: none; transform: scaleY(2.1); transform-origin: center; filter: drop-shadow(0 0 14px rgba(245,197,24,0.45)); }
 .tagline { color: var(--muted); margin: 0 0 20px; line-height: 1.6; }
 
 .field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px; }
