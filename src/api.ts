@@ -2,6 +2,7 @@ import cors from 'cors';
 import express from 'express';
 import { Connection, Client } from '@temporalio/client';
 import {
+  ActiveChamber,
   BatcomputerArgs,
   BatcomputerState,
   ChamberResponse,
@@ -137,8 +138,11 @@ async function main() {
   // --- active chamber state (child workflow) ---
   app.get('/api/cases/:code/chamber', async (req, res) => {
     const code = req.params.code;
-    const activeId = await activeChamberId(code);
-    if (!activeId) return res.json({ workerReachable: true, chamber: null } satisfies ChamberResponse);
+    const target = await resolveChamber(code, req.query.side);
+    if (!target) return res.json({ workerReachable: true, chamber: null } satisfies ChamberResponse);
+    const activeId = target.id;
+    // Cache key is per-side so two mirrored rooms don't overwrite each other's board.
+    const cacheKey = `${code}:${target.side ?? '-'}`;
     try {
       const chamber = await withTimeout(client.workflow.getHandle(activeId).query(getChamberQuery), 2000);
       // Sync the vault fight to Temporal's real retries: inject the live attempt number.
@@ -146,11 +150,11 @@ async function main() {
         const attempt = await overrideAttempt(client, activeId);
         if (attempt) chamber.data.attempt = attempt;
       }
-      lastChamber.set(code, chamber);
+      lastChamber.set(cacheKey, chamber);
       res.json({ workerReachable: true, chamber } satisfies ChamberResponse);
     } catch (err) {
       if (isNotFound(err)) return res.json({ workerReachable: true, chamber: null } satisfies ChamberResponse);
-      const cached = lastChamber.get(code);
+      const cached = lastChamber.get(cacheKey);
       if (cached) return res.json({ workerReachable: false, chamber: cached } satisfies ChamberResponse);
       res.status(503).json({ workerReachable: false, error: 'worker unreachable and no cached chamber' });
     }
@@ -162,10 +166,10 @@ async function main() {
     const operator = str(req.body?.operator);
     const action = str(req.body?.action);
     if (!operator || !action) return res.status(400).json({ error: 'operator and action required' });
-    const activeId = await activeChamberId(code);
-    if (!activeId) return res.status(409).json({ error: 'no active chamber' });
+    const target = await resolveChamber(code, req.body?.side);
+    if (!target) return res.status(409).json({ error: 'no active chamber' });
     try {
-      await client.workflow.getHandle(activeId).signal(chamberActionSignal, {
+      await client.workflow.getHandle(target.id).signal(chamberActionSignal, {
         operator,
         action: action as never,
         value: req.body?.value,
@@ -193,16 +197,18 @@ async function main() {
         } catch {
           /* adventure may be mid-transition */
         }
-        const chamberId = await activeChamberId(code);
-        if (chamberId) {
+        // A mirrored wave has two live chambers; trace both so the panel shows the
+        // parallelism rather than arbitrarily picking one room.
+        for (const c of await activeChambers(code)) {
+          const label = c.side ? `${c.side}: ` : '';
           try {
-            const childHist = await withTimeout(client.workflow.getHandle(chamberId).fetchHistory(), 3000);
-            collectEvents(childHist, 'chamber', items);
+            const childHist = await withTimeout(client.workflow.getHandle(c.id).fetchHistory(), 3000);
+            collectEvents(childHist, 'chamber', items, label);
           } catch {
             /* child may be mid-transition */
           }
           // Live retries live in the pending-activity state, not in history — surface them.
-          await collectPendingActivities(client, chamberId, items);
+          await collectPendingActivities(client, c.id, items, label);
         }
       }
       items.sort((a, b) => a.t - b.t);
@@ -224,18 +230,30 @@ async function main() {
     }
   }
 
-  // Resolve the active chamber (grandchild) via the active adventure. Query fresh so we never
-  // target a just-completed chamber; fall back to cache only when the worker is unreachable.
-  async function activeChamberId(code: string): Promise<string | null> {
+  // Resolve the live chambers (grandchildren) of the current wave via the active adventure.
+  // Query fresh so we never target a just-completed chamber; fall back to cache only when
+  // the worker is unreachable.
+  async function activeChambers(code: string): Promise<ActiveChamber[]> {
     const advId = await activeAdventureId(code);
-    if (!advId) return null;
+    if (!advId) return [];
     try {
       const shell = await withTimeout(client.workflow.getHandle(advId).query(getShellQuery), 2000);
       lastShell.set(code, shell);
-      return shell.activeChamberId;
+      return shell.chambers;
     } catch {
-      return lastShell.get(code)?.activeChamberId ?? null;
+      return lastShell.get(code)?.chambers ?? [];
     }
+  }
+
+  // Pick the chamber a request is about. A single-chamber wave ignores `side`
+  // entirely; a mirrored wave needs it, and defaults to the first room so a
+  // side-unaware client still gets something coherent.
+  async function resolveChamber(code: string, side: unknown): Promise<ActiveChamber | null> {
+    const chambers = await activeChambers(code);
+    if (chambers.length === 0) return null;
+    if (chambers.length === 1) return chambers[0];
+    const want = str(side);
+    return chambers.find((c) => c.side === want) ?? chambers[0];
   }
 
   app.listen(PORT, () => console.log(`🌐 API on http://localhost:${PORT} (Temporal @ ${ADDRESS})`));
@@ -286,10 +304,10 @@ function describeEvent(e: any): { kind: string; detail: string } | null {
   }
 }
 
-function collectEvents(hist: any, wf: 'hub' | 'case' | 'chamber', out: TraceEvent[]) {
+function collectEvents(hist: any, wf: 'hub' | 'case' | 'chamber', out: TraceEvent[], label = '') {
   for (const e of hist?.events ?? []) {
     const d = describeEvent(e);
-    if (d) out.push({ t: eventMs(e), wf, kind: d.kind, detail: d.detail });
+    if (d) out.push({ t: eventMs(e), wf, kind: d.kind, detail: `${label}${d.detail}` });
   }
 }
 
@@ -307,7 +325,7 @@ async function overrideAttempt(client: Client, workflowId: string): Promise<numb
   return undefined;
 }
 
-async function collectPendingActivities(client: Client, workflowId: string, out: TraceEvent[]) {
+async function collectPendingActivities(client: Client, workflowId: string, out: TraceEvent[], label = '') {
   try {
     const desc: any = await withTimeout(
       client.workflowService.describeWorkflowExecution({ namespace: 'default', execution: { workflowId } }),
@@ -318,7 +336,7 @@ async function collectPendingActivities(client: Client, workflowId: string, out:
       const last = pa.lastFailure?.message;
       if (attempt > 1 || last) {
         const name = pa.activityType?.name ?? 'activity';
-        out.push({ t: Date.now(), wf: 'chamber', kind: 'activity-fail', detail: `${name}: attempt ${attempt}, retrying${last ? ` — ${last}` : ''}` });
+        out.push({ t: Date.now(), wf: 'chamber', kind: 'activity-fail', detail: `${label}${name}: attempt ${attempt}, retrying${last ? ` — ${last}` : ''}` });
       }
     }
   } catch {

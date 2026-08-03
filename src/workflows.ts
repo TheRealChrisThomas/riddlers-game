@@ -9,9 +9,9 @@ import {
 } from '@temporalio/workflow';
 import type * as activities from './activities';
 import {
+  ActiveChamber,
   BatcomputerArgs,
   BatcomputerState,
-  CHAMBER_SEQUENCE,
   CHAMBER_TITLES,
   ChamberArgs,
   ChamberResult,
@@ -27,10 +27,13 @@ import {
   RiddleData,
   Role,
   ShellState,
+  SwitchboardData,
+  VILLAIN_CHAMBERS,
   VILLAIN_META,
   VILLAINS,
   Villain,
   VillainStatus,
+  chamberTitle,
   batSignal,
   chamberActionSignal,
   getBatcomputerQuery,
@@ -48,13 +51,41 @@ const { engageMechanism, disengageMechanism, overrideVault } = proxyActivities<t
 });
 
 const TAUNT_INTERVAL_MS = 22_000;
-const TAUNTS = [
-  'Tick-tock, Bat-Family. The clock is such an impatient little thing.',
-  'Struggling already? I do so love to watch a hero sweat.',
-  "You're cleverer than the last ones. They didn't make it out either.",
-  'Every second you waste, my walls grow a little closer.',
-  "Riddle me this: what's worth more than time, when you have so little of it left?",
-];
+
+// Server-side villain voice: the opening line, the lockdown line, and the timed
+// taunts a workflow timer drips into the shell state. Client-side flavour (chamber
+// intros, defeat, concession) lives in the web app's own registry.
+interface VillainVoice {
+  opening: string;
+  lockdown: (waves: number) => string;
+  taunts: string[];
+}
+const VILLAIN_VOICE: Record<Villain, VillainVoice> = {
+  riddler: {
+    opening:
+      'The Riddler: "Riddle me this, Bat-Family… can you escape my three chambers before the clock kills you all?"',
+    lockdown: (waves) => `Lockdown engaged. ${waves} chambers stand between you and freedom.`,
+    taunts: [
+      'Tick-tock, Bat-Family. The clock is such an impatient little thing.',
+      'Struggling already? I do so love to watch a hero sweat.',
+      "You're cleverer than the last ones. They didn't make it out either.",
+      'Every second you waste, my walls grow a little closer.',
+      "Riddle me this: what's worth more than time, when you have so little of it left?",
+    ],
+  },
+  twoface: {
+    opening: 'Two-Face: "Two rooms. Two truths. Neither of you can see both. Let\'s let the coin decide."',
+    lockdown: () => 'The scales tip. Two rooms seal at once — and they are wired to each other.',
+    taunts: [
+      "Talk to each other. It won't save you, but I do enjoy the noise.",
+      'Half of what you know is a lie. Care to guess which half?',
+      'Harvey would give you a fair chance. Harvey is not in charge tonight.',
+      'One room is running out of time faster than the other. I flipped for it.',
+    ],
+  },
+  joker: { opening: '', lockdown: () => '', taunts: [] }, // sealed
+  penguin: { opening: '', lockdown: () => '', taunts: [] }, // sealed
+};
 
 // ============================================================================
 // GRANDPARENT: the Bat-computer. A long-lived, durable hub keyed on the case
@@ -181,42 +212,44 @@ export async function escapeWorkflow(args: EscapeArgs): Promise<ShellState> {
   const players = new Map<string, Role>();
   for (const p of args.seedRoster ?? []) players.set(p.operator, p.role); // seeded by the Bat-computer
   const round = args.round ?? 1;
+  const plan = VILLAIN_CHAMBERS[args.villain];
+  const voice = VILLAIN_VOICE[args.villain];
   let status: ShellState['status'] = 'lobby';
   let deadlineEpochMs: number | null = null;
-  let chamberIndex = 0;
-  let activeChamberId: string | null = null;
+  let chamberIndex = 0; // wave index
+  let chambers: ActiveChamber[] = [];
   let taunt: ShellState['taunt'] = null;
   let tauntSeq = 0;
-  const log: string[] = [
-    'The Riddler: "Riddle me this, Bat-Family… can you escape my three chambers before the clock kills you all?"',
-  ];
+  const log: string[] = [voice.opening];
 
   const roster = (): Player[] => [...players].map(([operator, role]) => ({ operator, role }));
-  const activeType = () => (status === 'in_chamber' ? CHAMBER_SEQUENCE[chamberIndex] : null);
-  const shell = (): ShellState => {
-    const type = activeType();
-    return {
-      status,
-      caseCode: args.caseCode,
-      deadlineEpochMs,
-      chamberIndex,
-      chamberTotal: CHAMBER_SEQUENCE.length,
-      chamberType: type,
-      chamberTitle: type ? CHAMBER_TITLES[type] : null,
-      activeChamberId,
-      roster: roster(),
-      taunt,
-      log,
-    };
-  };
+  const shell = (): ShellState => ({
+    status,
+    caseCode: args.caseCode,
+    villain: args.villain,
+    deadlineEpochMs,
+    chamberIndex,
+    chamberTotal: plan.length,
+    chambers,
+    roster: roster(),
+    taunt,
+    log,
+  });
 
   setHandler(getShellQuery, shell);
+
+  // A sealed case file has no plan — refuse rather than "escape" for free.
+  if (plan.length === 0) {
+    status = 'failed';
+    log.push('That case file is sealed. There is nothing here to escape.');
+    return shell();
+  }
 
   // Hub-launched: the roster is already seeded and the signal has been lit, so the
   // clock starts immediately. (Role assembly + replay both live on the Bat-computer.)
   deadlineEpochMs = Date.now() + args.durationMs;
   status = 'in_chamber';
-  log.push('Lockdown engaged. Three chambers stand between you and freedom.');
+  log.push(voice.lockdown(plan.length));
 
   // Timed taunts: while a chamber runs, we race its completion against a recurring timer,
   // dripping new taunts into the shell state (which the client turns into pop-up dialogs).
@@ -224,43 +257,75 @@ export async function escapeWorkflow(args: EscapeArgs): Promise<ShellState> {
   // than a detached one) keeps command ordering deterministic alongside the child starts.
   let tauntIdx = 0;
   const emitTaunt = () => {
-    taunt = { id: ++tauntSeq, text: TAUNTS[tauntIdx++ % TAUNTS.length] };
-    log.push(`The Riddler: "${taunt.text}"`);
+    taunt = { id: ++tauntSeq, text: voice.taunts[tauntIdx++ % voice.taunts.length] };
+    log.push(`${VILLAIN_META[args.villain].name}: "${taunt.text}"`);
   };
 
-  let failedType: (typeof CHAMBER_SEQUENCE)[number] | null = null;
-  for (let i = 0; i < CHAMBER_SEQUENCE.length; i++) {
-    chamberIndex = i;
-    const type = CHAMBER_SEQUENCE[i];
-    activeChamberId = `${args.caseCode}#r${round}c${i + 1}`;
-    log.push(`Entering ${CHAMBER_TITLES[type]}…`);
-    const handle = await startChild(chamberWorkflow, {
-      workflowId: activeChamberId,
-      args: [{ type, caseCode: args.caseCode, deadlineEpochMs, roster: roster(), reveal: args.reveal }],
-    });
-    const completion = handle.result();
+  let failedTitle: string | null = null;
+  for (let wave = 0; wave < plan.length; wave++) {
+    chamberIndex = wave;
+    const slots = plan[wave];
+    // Single-slot waves keep the original `CODE#r1c1` id shape; a mirrored wave
+    // suffixes the side so both children get distinct, deterministic ids.
+    const ids = slots.map(
+      (s, j) => `${args.caseCode}#r${round}c${wave + 1}${slots.length > 1 ? `-${s.side ?? j + 1}` : ''}`,
+    );
+    chambers = slots.map((s, j) => ({
+      id: ids[j],
+      type: s.type,
+      title: chamberTitle(s),
+      side: s.side ?? null,
+    }));
+    log.push(`Entering ${chambers.map((c) => c.title).join(' and ')}…`);
 
-    let result: ChamberResult | undefined;
-    while (result === undefined) {
+    // startChild is awaited one at a time so command order stays deterministic;
+    // the children still run concurrently once started.
+    const handles = [];
+    for (let j = 0; j < slots.length; j++) {
+      handles.push(
+        await startChild(chamberWorkflow, {
+          workflowId: ids[j],
+          args: [
+            {
+              type: slots[j].type,
+              side: slots[j].side,
+              caseCode: args.caseCode,
+              deadlineEpochMs,
+              roster: roster(),
+              peerWorkflowId: slots.length === 2 ? ids[1 - j] : undefined,
+              reveal: args.reveal,
+            },
+          ],
+        }),
+      );
+    }
+    // NOTE: Promise.all rejects if any child is cancelled rather than completing.
+    // Nothing cancels a chamber yet; when something does, this needs to treat a
+    // cancelled sibling as "sealed" instead of letting the rejection escape.
+    const completion = Promise.all(handles.map((h) => h.result()));
+
+    let results: ChamberResult[] | undefined;
+    while (results === undefined) {
       const outcome = await Promise.race([
         completion.then((r) => ({ kind: 'done' as const, r })),
         sleep(TAUNT_INTERVAL_MS).then(() => ({ kind: 'taunt' as const })),
       ]);
-      if (outcome.kind === 'done') result = outcome.r;
+      if (outcome.kind === 'done') results = outcome.r;
       else emitTaunt();
     }
 
-    if (!result.cleared) {
-      failedType = type;
+    const missed = results.findIndex((r) => !r.cleared);
+    if (missed >= 0) {
+      failedTitle = chambers[missed].title;
       break;
     }
-    log.push(`${CHAMBER_TITLES[type]} cleared.`);
+    log.push(`${chambers.map((c) => c.title).join(' and ')} cleared.`);
   }
 
-  activeChamberId = null;
-  if (failedType) {
+  chambers = [];
+  if (failedTitle) {
     status = 'failed';
-    log.push(`${CHAMBER_TITLES[failedType]} was not cleared in time. The trap springs. ☠️`);
+    log.push(`${failedTitle} was not cleared in time. The trap springs. ☠️`);
   } else {
     status = 'escaped';
     log.push('The final door slides open. The Bat-Family escapes into the Gotham night. 🦇');
@@ -282,7 +347,28 @@ export async function chamberWorkflow(args: ChamberArgs): Promise<ChamberResult>
       return deathtrapChamber(args);
     case 'escape':
       return escapeChamber(args);
+    case 'switchboard':
+      return switchboardChamber(args);
   }
+}
+
+// --- Two-Face's mirrored rooms: placeholder until the case itself is built. ---
+// Answers queries with a well-formed sealed board so the plumbing (parallel
+// children, sided ids, per-side queries) can be exercised end to end.
+async function switchboardChamber(args: ChamberArgs): Promise<ChamberResult> {
+  const side = args.side ?? 'law';
+  const log: string[] = ['This room is still sealed. Two-Face has not finished wiring it.'];
+  setHandler(getChamberQuery, () => ({
+    type: 'switchboard',
+    side,
+    title: chamberTitle({ type: 'switchboard', side }),
+    cleared: false,
+    deadlineEpochMs: args.deadlineEpochMs,
+    data: { kind: 'switchboard', side, solved: false } as SwitchboardData,
+    log,
+  }));
+  await condition(() => false, args.deadlineEpochMs - Date.now());
+  return { cleared: false };
 }
 
 // --- Chamber 1: signals in / query out; the workflow holds a secret code ---
@@ -301,6 +387,7 @@ async function riddleChamber(args: ChamberArgs): Promise<ChamberResult> {
 
   const state = (): ChamberState => ({
     type: 'riddle',
+    side: null,
     title: CHAMBER_TITLES.riddle,
     cleared: solved,
     deadlineEpochMs: args.deadlineEpochMs,
@@ -362,6 +449,7 @@ async function deathtrapChamber(args: ChamberArgs): Promise<ChamberResult> {
   const steps = (): DeathtrapStep[] => baseSteps.map((s) => ({ ...s, engaged: engaged.has(s.id) }));
   const state = (): ChamberState => ({
     type: 'deathtrap',
+    side: null,
     title: CHAMBER_TITLES.deathtrap,
     cleared: disarmed,
     deadlineEpochMs: args.deadlineEpochMs,
@@ -446,6 +534,7 @@ async function escapeChamber(args: ChamberArgs): Promise<ChamberResult> {
 
   const state = (): ChamberState => ({
     type: 'escape',
+    side: null,
     title: CHAMBER_TITLES.escape,
     cleared: phase === 'open',
     deadlineEpochMs: args.deadlineEpochMs,
