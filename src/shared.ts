@@ -4,8 +4,17 @@
 // SDK; everything in this file is server-side only.
 //
 // Server code can keep importing shapes from './shared' — they're re-exported.
-import { defineSignal, defineQuery } from '@temporalio/workflow';
-import type { BatcomputerState, ChamberAction, ChamberState, Role, ShellState, Villain } from './protocol';
+import { defineSignal, defineQuery, defineUpdate } from '@temporalio/workflow';
+import type {
+  BatcomputerState,
+  ChamberAction,
+  ChamberState,
+  CoinCallArgs,
+  CoinCallResult,
+  Role,
+  ShellState,
+  Villain,
+} from './protocol';
 
 export * from './protocol';
 
@@ -21,6 +30,11 @@ export const setRoleSignal = defineSignal<[{ operator: string; role: Role }]>('s
 export const startSignal = defineSignal<[]>('start');
 export const playAgainSignal = defineSignal<[]>('playAgain');
 export const getShellQuery = defineQuery<ShellState>('getShell');
+
+// Calling Two-Face's coin is an UPDATE, not a signal: it is validated before it is
+// admitted (a late or duplicate call is refused with a reason, and the refusal never
+// enters history at all), and it hands the outcome straight back to the caller.
+export const callCoinUpdate = defineUpdate<CoinCallResult, [CoinCallArgs]>('callCoin');
 
 // --- Chamber (child): one per room ---
 export const chamberActionSignal = defineSignal<[ChamberAction]>('action');
