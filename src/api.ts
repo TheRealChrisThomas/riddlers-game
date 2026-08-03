@@ -5,8 +5,11 @@ import {
   ActiveChamber,
   BatcomputerArgs,
   BatcomputerState,
+  COIN_FACES,
   ChamberResponse,
   ChamberState,
+  CoinCallResult,
+  CoinFace,
   HubResponse,
   Role,
   ROLES,
@@ -18,6 +21,7 @@ import {
   VILLAINS,
   Villain,
   batSignal,
+  callCoinUpdate,
   chamberActionSignal,
   getBatcomputerQuery,
   getChamberQuery,
@@ -102,6 +106,32 @@ async function main() {
       res.status(503).json({ error: 'could not deliver signal', detail: String(err) });
     }
   }
+
+  // --- Call Two-Face's coin (an Update on the adventure, not a signal) ---
+  // Unlike every other mutation here, this one is request/response: the update is
+  // validated first, and either comes back with the outcome or with the reason it
+  // was refused. A refused call is a 409 carrying the validator's own message.
+  app.post('/api/cases/:code/coin', async (req, res) => {
+    const operator = str(req.body?.operator);
+    const call = str(req.body?.call) as CoinFace;
+    if (!operator) return res.status(400).json({ error: 'operator required' });
+    if (!COIN_FACES.includes(call)) return res.status(400).json({ error: 'call must be heads or tails' });
+    const advId = await activeAdventureId(req.params.code);
+    if (!advId) return res.status(409).json({ error: 'no active case' });
+    try {
+      const result = await client.workflow.getHandle(advId).executeUpdate(callCoinUpdate, {
+        args: [{ operator, call }],
+      });
+      res.json(result satisfies CoinCallResult);
+    } catch (err) {
+      // The validator's rejection reason travels as the cause, not the top-level
+      // message ("Workflow Update failed"), so unwrap it or the player learns nothing.
+      const cause = (err as { cause?: { message?: string } }).cause;
+      if (cause?.message) return res.status(409).json({ error: cause.message });
+      if (isNotFound(err)) return res.status(409).json({ error: 'the coin has already landed' });
+      res.status(503).json({ error: 'could not call the coin', detail: String(err) });
+    }
+  });
 
   // --- Bat-computer hub state (grandparent) ---
   app.get('/api/cases/:code/hub', async (req, res) => {
@@ -275,6 +305,15 @@ function describeEvent(e: any): { kind: string; detail: string } | null {
       return { kind: 'start', detail: 'Workflow execution started' };
     case 'workflowExecutionSignaledEventAttributes':
       return { kind: 'signal', detail: `Signal received: ${a.signalName}` };
+    // Only ACCEPTED updates reach history — a call the validator refused leaves no
+    // event behind at all, which is itself worth seeing in the trace.
+    case 'workflowExecutionUpdateAcceptedEventAttributes':
+      return {
+        kind: 'update',
+        detail: `Update accepted: ${a.acceptedRequest?.input?.name ?? 'update'} (validated)`,
+      };
+    case 'workflowExecutionUpdateCompletedEventAttributes':
+      return { kind: 'update', detail: 'Update completed — outcome returned to the caller' };
     case 'timerStartedEventAttributes':
       return { kind: 'timer', detail: 'Durable timer started' };
     case 'timerFiredEventAttributes':

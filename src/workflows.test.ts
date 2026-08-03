@@ -5,21 +5,25 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import * as activities from './activities';
 import {
   BatcomputerState,
+  COIN_FACES,
   ChamberAction,
   ChamberState,
+  CoinFace,
   DeathtrapData,
   EscapeData,
   Player,
   RiddleData,
+  ShellState,
   TASK_QUEUE,
   batSignal,
+  callCoinUpdate,
   chamberActionSignal,
   getBatcomputerQuery,
   getChamberQuery,
   getShellQuery,
   joinSignal,
 } from './shared';
-import { batcomputerWorkflow, chamberWorkflow, escapeWorkflow } from './workflows';
+import { COIN_WINDOW_MS, batcomputerWorkflow, chamberWorkflow, escapeWorkflow } from './workflows';
 
 // ============================================================================
 // These run against Temporal's time-skipping test server: when every workflow
@@ -337,6 +341,108 @@ describe('the Bat-computer (grandparent: score, Continue-As-New)', () => {
     const result = await handle.result();
     expect(result.status).toBe('failed');
     expect(result.chambers).toEqual([]);
+  });
+
+  // --- Two-Face's coin gate (Workflow Update + validator) ---
+  // Driven by starting the adventure directly: the case file is still sealed on the
+  // hub, so a Bat-Signal can't reach it yet.
+  // The case code must be unique per test, not just the adventure id: chamber
+  // workflowIds are derived from it, so a shared code makes each test's children
+  // collide with the last test's and fails the parent on startChild.
+  const startTwoFace = () =>
+    env.client.workflow.start(escapeWorkflow, {
+      taskQueue: TASK_QUEUE,
+      workflowId: uniqueId('adv-coin'),
+      args: [
+        {
+          villain: 'twoface',
+          caseCode: uniqueId('COIN').toUpperCase(),
+          durationMs: 20 * 60_000,
+          seedRoster: SOLO,
+          autoStart: true,
+        },
+      ],
+    });
+
+  type TwoFaceHandle = Awaited<ReturnType<typeof startTwoFace>>;
+  const atGate = (handle: TwoFaceHandle) =>
+    until(() => handle.query(getShellQuery), (s: ShellState) => s.status === 'at_gate' && !!s.coin, 'the coin gate');
+
+  it('withholds the coin face until someone calls it', async () => {
+    const handle = await startTwoFace();
+    const shell = await atGate(handle);
+    // The flip has already happened and is recorded — but the query must not leak it,
+    // or the players could simply read the answer off the board.
+    expect(shell.coin!.phase).toBe('in_air');
+    expect(shell.coin!.face).toBeNull();
+    expect(shell.coin!.call).toBeNull();
+    await handle.terminate();
+  });
+
+  it('returns the outcome to the caller and reveals the face', async () => {
+    const handle = await startTwoFace();
+    await atGate(handle);
+
+    const result = await handle.executeUpdate(callCoinUpdate, { args: [{ operator: 'chris', call: 'heads' }] });
+    // An Update hands its result straight back — no follow-up poll needed.
+    expect(COIN_FACES).toContain(result.face);
+    expect(result.call).toBe('heads');
+    expect(result.won).toBe(result.face === 'heads');
+    expect(result.favored).toBe(result.face === 'heads' ? 'law' : 'chaos');
+    expect(result.scarred).toBe(!result.won);
+
+    const shell = await until(
+      () => handle.query(getShellQuery),
+      (s) => s.coin?.phase === 'resolved',
+      'the coin to resolve',
+    );
+    expect(shell.coin!.face).toBe(result.face); // revealed now that it's been called
+    expect(shell.coin!.calledBy).toBe('chris');
+    await handle.terminate();
+  });
+
+  it('rejects a second call with the validator’s reason', async () => {
+    const handle = await startTwoFace();
+    await atGate(handle);
+    await handle.executeUpdate(callCoinUpdate, { args: [{ operator: 'chris', call: 'heads' }] });
+
+    // The rejection travels as the cause, not the top-level message. Nothing is
+    // written to history for a refused update.
+    await expect(
+      handle.executeUpdate(callCoinUpdate, { args: [{ operator: 'barbara', call: 'tails' }] }),
+    ).rejects.toMatchObject({ cause: { message: expect.stringContaining('already called it') } });
+    await handle.terminate();
+  });
+
+  it('rejects a call that is neither heads nor tails', async () => {
+    const handle = await startTwoFace();
+    await atGate(handle);
+    await expect(
+      handle.executeUpdate(callCoinUpdate, { args: [{ operator: 'chris', call: 'edge' as CoinFace }] }),
+    ).rejects.toMatchObject({ cause: { message: expect.stringContaining('heads or tails') } });
+
+    // A refused call leaves the coin exactly as it was — still callable.
+    const shell = await handle.query(getShellQuery);
+    expect(shell.coin!.phase).toBe('in_air');
+    await handle.terminate();
+  });
+
+  it('lets Two-Face call it — badly — when the window lapses', async () => {
+    const handle = await startTwoFace();
+    await atGate(handle);
+    // Advance the clock explicitly rather than polling and hoping the server skips:
+    // a tight query loop keeps the test server looking busy, so auto-skipping never
+    // kicks in and the window never actually lapses.
+    await env.sleep(COIN_WINDOW_MS + 1_000);
+    const shell = await until(
+      () => handle.query(getShellQuery),
+      (s) => s.coin?.phase === 'resolved',
+      'the call window to lapse',
+    );
+    expect(shell.coin!.calledBy).toBeNull(); // nobody called
+    expect(shell.coin!.won).toBe(false); // and Two-Face never calls it right
+    expect(shell.coin!.scarred).toBe(true);
+    await handle.terminate();
   });
 
   it('banks the score and Continue-As-News after a won case', async () => {

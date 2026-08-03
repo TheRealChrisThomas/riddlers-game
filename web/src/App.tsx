@@ -13,10 +13,15 @@ import { BootTerminal } from './Boot';
 import { BatEmblem, HeroMascot, Riddler, RoleAvatar, VictoryBats, type HeroMood, type RiddlerMood } from './pixel';
 import {
   BatcomputerState,
+  CHAMBER_SIDE_TITLES,
+  COIN_FACES,
   ChamberResponse,
   ChamberSide,
   ChamberState,
   ChamberType,
+  CoinCallResult,
+  CoinFace,
+  CoinState,
   DeathtrapData,
   EscapeData,
   HERO_VOW,
@@ -122,6 +127,13 @@ const batSignalReq = (code: string, villain: Villain) => post(`/api/cases/${code
 // `side` only matters in a mirrored wave (Two-Face); a single-chamber wave ignores it.
 const chamberAction = (code: string, operator: string, action: string, value?: unknown, side?: ChamberSide) =>
   post(`/api/cases/${code}/chamber/action`, { operator, action, value, side });
+
+// The one mutation in the app that is request/response rather than fire-and-forget:
+// it is an Update, so it either returns the outcome or throws the validator's reason.
+async function callCoin(code: string, operator: string, call: CoinFace): Promise<CoinCallResult> {
+  const r = await post(`/api/cases/${code}/coin`, { operator, call });
+  return (await r.json()) as CoinCallResult;
+}
 
 async function getHub(code: string): Promise<HubResponse | null> {
   const r = await fetch(`/api/cases/${code}/hub`);
@@ -421,7 +433,7 @@ function Case(props: { code: string; operator: string; villain: Villain; onBackT
   return (
     <FailureReporter.Provider value={setActionError}>
     <div className={`shell room${showTrace ? ' trace-open' : ''}`}>
-      {dialog && <RiddlerDialog message={dialog} onClose={() => setDialog(null)} />}
+      {dialog && <VillainDialog villain={villain} message={dialog} onClose={() => setDialog(null)} />}
       {danger && <div className="layer danger-pulse" aria-hidden />}
       {shell.status === 'escaped' && <VictoryBats />}
       <div className="layer mascot">
@@ -459,6 +471,10 @@ function Case(props: { code: string; operator: string; villain: Villain; onBackT
         onToggleTrace={toggleTrace}
       />
 
+      {shell.status === 'at_gate' && shell.coin && (
+        <CoinGate code={code} operator={operator} coin={shell.coin} now={now} />
+      )}
+
       {shell.status === 'in_chamber' && (
         <>
           <ChamberHeader shell={shell} now={now} />
@@ -488,13 +504,16 @@ function Case(props: { code: string; operator: string; villain: Villain; onBackT
   );
 }
 
-function RiddlerDialog(props: { message: string; onClose: () => void }) {
+// The villain's blocking dialog. The name comes from the case being played — a
+// Two-Face line under the Riddler's byline is worse than no byline at all.
+// TODO: the sprite is still the Riddler's for every villain; Two-Face needs its own.
+function VillainDialog(props: { villain: Villain; message: string; onClose: () => void }) {
   return (
     <div className="layer modal-overlay" onClick={props.onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <div className="riddler-head">
           <Riddler mood="cackle" size={64} />
-          <span className="riddler-name">THE RIDDLER</span>
+          <span className="riddler-name">{VILLAIN_META[props.villain].name.toUpperCase()}</span>
         </div>
         <p className="riddler-msg">{props.message}</p>
         <button className="primary" onClick={props.onClose}>Continue</button>
@@ -903,6 +922,76 @@ function ChamberHeader(props: { shell: ShellState; now: number }) {
       </div>
       <div className={`clock ${danger ? 'danger' : ''}`}>{mm}:{ss}</div>
     </>
+  );
+}
+
+// --- Two-Face's coin gate ---
+// The coin is already flipped and recorded before this screen renders; the face is
+// withheld by the workflow until someone calls. Because the call is an Update, the
+// caller gets the verdict back in the same round trip — no waiting for the next poll —
+// while everyone else picks it up from the shell state a beat later.
+function CoinGate(props: { code: string; operator: string; coin: CoinState; now: number }) {
+  const { code, operator, coin, now } = props;
+  const [pending, setPending] = useState(false);
+  const [refusal, setRefusal] = useState('');
+  const [mine, setMine] = useState<CoinCallResult | null>(null);
+
+  const settled: CoinCallResult | null =
+    mine ??
+    (coin.phase === 'resolved' && coin.face && coin.call && coin.favored !== null
+      ? { face: coin.face, call: coin.call, won: !!coin.won, favored: coin.favored, scarred: !!coin.scarred }
+      : null);
+  const secondsLeft = Math.max(0, Math.ceil((coin.deadlineEpochMs - now) / 1000));
+
+  const call = async (face: CoinFace) => {
+    setPending(true);
+    setRefusal('');
+    try {
+      setMine(await callCoin(code, operator, face));
+    } catch (e) {
+      // A refused call never reached history — this message is the validator's own.
+      setRefusal(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPending(false);
+    }
+  };
+
+  if (settled)
+    return (
+      <div className="coin-gate">
+        <div className={`coin landed ${settled.face}`} aria-label={`the coin came up ${settled.face}`}>
+          {settled.face === 'heads' ? '☺' : '☹'}
+        </div>
+        <p className="objective">
+          {settled.won ? 'Called it.' : 'Wrong call.'} The coin came up <strong>{settled.face}</strong>
+          {coin.calledBy ? ` — ${coin.calledBy} said ${settled.call}.` : ` — nobody called, so Two-Face did.`}
+        </p>
+        <p className="hint">
+          {CHAMBER_SIDE_TITLES[settled.favored]} holds the advantage.{' '}
+          {settled.scarred ? 'And the board is scarred: one rule is hidden.' : 'The board is fair — this once.'}
+        </p>
+      </div>
+    );
+
+  return (
+    <div className="coin-gate">
+      <div className="coin spinning" aria-label="the coin is in the air">
+        ⧗
+      </div>
+      <p className="objective">The coin is in the air. Call it.</p>
+      <p className="hint">
+        It landed the moment it was flipped — the result is already written down. Calling late is calling wrong.
+      </p>
+      <div className="coin-calls">
+        {COIN_FACES.map((face) => (
+          <button key={face} className="primary big" disabled={pending} onClick={() => call(face)}>
+            {face.toUpperCase()}
+          </button>
+        ))}
+      </div>
+      <p className={`coin-clock ${secondsLeft <= 5 ? 'danger' : ''}`}>{secondsLeft}s</p>
+      {refusal && <p className="error">Refused: {refusal}</p>}
+    </div>
   );
 }
 

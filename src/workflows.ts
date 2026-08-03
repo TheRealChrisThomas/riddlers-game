@@ -15,7 +15,12 @@ import {
   CHAMBER_TITLES,
   ChamberArgs,
   ChamberResult,
+  CHAMBER_SIDE_TITLES,
   ChamberState,
+  COIN_FACES,
+  CoinCallResult,
+  CoinFace,
+  CoinState,
   DeathtrapData,
   DeathtrapStep,
   EscapeArgs,
@@ -29,10 +34,12 @@ import {
   ShellState,
   SwitchboardData,
   VILLAIN_CHAMBERS,
+  VILLAIN_GATE,
   VILLAIN_META,
   VILLAINS,
   Villain,
   VillainStatus,
+  callCoinUpdate,
   chamberTitle,
   batSignal,
   chamberActionSignal,
@@ -45,12 +52,14 @@ import {
 
 const ADVENTURE_SCORE = 100; // points banked for clearing a villain (placeholder; time-scale later)
 
-const { engageMechanism, disengageMechanism, overrideVault } = proxyActivities<typeof activities>({
+const { engageMechanism, disengageMechanism, overrideVault, flipCoin } = proxyActivities<typeof activities>({
   startToCloseTimeout: '10s',
   retry: { initialInterval: '500ms', backoffCoefficient: 2, maximumAttempts: 10 },
 });
 
 const TAUNT_INTERVAL_MS = 22_000;
+export const COIN_WINDOW_MS = 20_000; // how long the coin hangs in the air waiting for a call
+export const COIN_REVEAL_MS = 5_000; // how long the gate holds after the call, so the reveal reads
 
 // Server-side villain voice: the opening line, the lockdown line, and the timed
 // taunts a workflow timer drips into the shell state. Client-side flavour (chamber
@@ -223,6 +232,7 @@ export async function escapeWorkflow(args: EscapeArgs): Promise<ShellState> {
   const log: string[] = [voice.opening];
 
   const roster = (): Player[] => [...players].map(([operator, role]) => ({ operator, role }));
+  let coin: CoinState | null = null;
   const shell = (): ShellState => ({
     status,
     caseCode: args.caseCode,
@@ -231,6 +241,9 @@ export async function escapeWorkflow(args: EscapeArgs): Promise<ShellState> {
     chamberIndex,
     chamberTotal: plan.length,
     chambers,
+    // While the coin is in the air the face is withheld: the workflow is the only
+    // thing that knows it, and the query must not leak what the players are betting on.
+    coin: coin && (coin.phase === 'in_air' ? { ...coin, face: null } : coin),
     roster: roster(),
     taunt,
     log,
@@ -248,6 +261,28 @@ export async function escapeWorkflow(args: EscapeArgs): Promise<ShellState> {
   // Hub-launched: the roster is already seeded and the signal has been lit, so the
   // clock starts immediately. (Role assembly + replay both live on the Bat-computer.)
   deadlineEpochMs = Date.now() + args.durationMs;
+
+  // --- The gate: a beat on the parent before any chamber opens. ---
+  if (VILLAIN_GATE[args.villain] === 'coin') {
+    status = 'at_gate';
+    // Built here and mutated in place so the query can watch it land live.
+    coin = {
+      phase: 'in_air',
+      deadlineEpochMs: 0,
+      face: null,
+      call: null,
+      calledBy: null,
+      won: null,
+      favored: null,
+      scarred: null,
+    };
+    await runCoinGate(coin, log);
+    // Hold at the gate long enough for the reveal to land. Without this the coin
+    // resolves and the chambers open in the same instant, so the player never sees
+    // what their call cost them. A durable timer, so the beat survives a restart.
+    await sleep(COIN_REVEAL_MS);
+  }
+
   status = 'in_chamber';
   log.push(voice.lockdown(plan.length));
 
@@ -334,6 +369,84 @@ export async function escapeWorkflow(args: EscapeArgs): Promise<ShellState> {
   // Report the terminal state up to the Bat-computer, which banks the score and
   // owns replay (re-lighting the signal launches a fresh adventure run).
   return shell();
+}
+
+// ============================================================================
+// Two-Face's coin gate — the case's opening beat, and its lesson in Updates.
+//
+// The order matters and is the whole point: the coin is flipped by an ACTIVITY
+// first, so its result is written into event history before the call window even
+// opens. A replay reads that value back out of history rather than re-rolling it,
+// so the house provably cannot re-flip to beat your call — and the trace panel
+// shows the flip landing ahead of the call.
+//
+// The call arrives as an UPDATE rather than a signal, which buys three things a
+// signal cannot: it is validated before admission, a refusal comes back with a
+// reason (and never enters history at all), and the outcome is returned to the
+// caller in the same round trip instead of needing a follow-up poll.
+// ============================================================================
+async function runCoinGate(coin: CoinState, log: string[]): Promise<void> {
+  const { face } = await flipCoin(); // recorded in history before anyone can call it
+  coin.face = face;
+  coin.deadlineEpochMs = Date.now() + COIN_WINDOW_MS;
+  log.push('Two-Face: "The coin is already in the air. Call it — heads or tails."');
+
+  const resolve = (call: CoinFace, operator: string | null): CoinCallResult => {
+    coin.call = call;
+    coin.calledBy = operator;
+    coin.won = call === coin.face;
+    // The face decides which room the coin favours; being wrong scars the board.
+    coin.favored = coin.face === 'heads' ? 'law' : 'chaos';
+    coin.scarred = !coin.won;
+    coin.phase = 'resolved';
+    return {
+      face: coin.face!,
+      call,
+      won: coin.won,
+      favored: coin.favored,
+      scarred: coin.scarred,
+    };
+  };
+
+  setHandler(
+    callCoinUpdate,
+    ({ operator, call }) => {
+      const result = resolve(call, operator);
+      log.push(
+        result.won
+          ? `${operator} called ${call} — and the coin agrees. ${CHAMBER_SIDE_TITLES[result.favored]} holds the advantage.`
+          : `${operator} called ${call}. It came up ${result.face}. Two-Face scars the board.`,
+      );
+      return result;
+    },
+    {
+      // Validators run before the update is admitted, must be synchronous, and must
+      // not touch workflow state — reading it is fine, changing it is not. A throw
+      // here rejects the call outright: nothing is written to history, so a refused
+      // call leaves no trace at all (which is why the refusals are logged above
+      // only once a call actually lands).
+      validator: ({ operator, call }) => {
+        if (coin.phase === 'resolved') {
+          throw new Error(
+            coin.calledBy
+              ? `${coin.calledBy} already called it. The coin only lands once.`
+              : 'The coin has already landed.',
+          );
+        }
+        if (!COIN_FACES.includes(call)) throw new Error('Call it heads or tails — nothing else.');
+        if (!operator) throw new Error('Only a hero on the roster may call the coin.');
+      },
+    },
+  );
+
+  // A durable timer bounds the window. Let it lapse and Two-Face calls for you —
+  // badly, on purpose — so an idle team can never wedge the case.
+  const called = await condition(() => coin.phase === 'resolved', COIN_WINDOW_MS);
+  if (!called) {
+    const wrong: CoinFace = coin.face === 'heads' ? 'tails' : 'heads';
+    resolve(wrong, null);
+    log.push(`Nobody called. Two-Face calls it for you: "${wrong}." It was ${coin.face}. Of course it was.`);
+  }
 }
 
 // ============================================================================

@@ -114,6 +114,53 @@ export const CHAMBER_SIDE_TITLES: Record<ChamberSide, string> = {
 export const chamberTitle = (slot: ChamberSlot): string =>
   slot.side ? CHAMBER_SIDE_TITLES[slot.side] : CHAMBER_TITLES[slot.type];
 
+// ============================================================================
+// Gates — a beat that runs on the parent BEFORE any chamber opens. Two-Face's
+// coin gate is the only one; the Riddler walks straight into his first chamber.
+// ============================================================================
+export type GateKind = 'coin';
+export const VILLAIN_GATE: Record<Villain, GateKind | null> = {
+  riddler: null,
+  twoface: 'coin',
+  joker: null,
+  penguin: null,
+};
+
+export type CoinFace = 'heads' | 'tails';
+export const COIN_FACES: CoinFace[] = ['heads', 'tails'];
+
+// The coin is flipped and recorded FIRST, then the call window opens, so `face`
+// stays null in the query while the coin is in the air — the workflow is the only
+// thing that knows it, exactly like the riddle lock's secret code.
+export interface CoinState {
+  phase: 'in_air' | 'resolved';
+  deadlineEpochMs: number; // the call window; let it lapse and Two-Face calls for you
+  face: CoinFace | null; // revealed only once resolved
+  call: CoinFace | null;
+  calledBy: string | null; // null when the window lapsed and nobody called
+  won: boolean | null;
+  // Consequences carried into the chambers: which room the coin favours, and
+  // whether a wrong call scarred the constraint set.
+  favored: ChamberSide | null;
+  scarred: boolean | null;
+}
+
+// What calling the coin gives you back. An Update returns a value to its caller
+// in the same round trip, so the call and the reveal are one exchange — a Signal
+// could never do this, it would have to be followed by a poll.
+export interface CoinCallResult {
+  face: CoinFace;
+  call: CoinFace;
+  won: boolean;
+  favored: ChamberSide;
+  scarred: boolean;
+}
+
+export interface CoinCallArgs {
+  operator: string;
+  call: CoinFace;
+}
+
 export const VILLAIN_CHAMBERS: Record<Villain, ChamberPlan> = {
   riddler: [[{ type: 'riddle' }], [{ type: 'deathtrap' }], [{ type: 'escape' }]],
   twoface: [[{ type: 'switchboard', side: 'law' }, { type: 'switchboard', side: 'chaos' }]],
@@ -158,7 +205,7 @@ export interface BatcomputerArgs {
 // Parent workflow: adventureWorkflow (workflowId = <case>-<villain>-r<round>)
 // Launched as a child of the Bat-computer. Runs the villain's chambers.
 // ============================================================================
-export type EscapeStatus = 'lobby' | 'in_chamber' | 'escaped' | 'failed';
+export type EscapeStatus = 'lobby' | 'at_gate' | 'in_chamber' | 'escaped' | 'failed';
 
 // One live chamber inside the current wave. A single-chamber wave (the Riddler)
 // has exactly one of these; Two-Face's mirrored wave has two.
@@ -177,6 +224,7 @@ export interface ShellState {
   chamberIndex: number; // 0-based index of the active/next WAVE
   chamberTotal: number; // number of waves in this villain's plan
   chambers: ActiveChamber[]; // live chambers in the current wave (empty between waves)
+  coin: CoinState | null; // present from the moment the coin is flipped (Two-Face only)
   roster: Player[];
   taunt: { id: number; text: string } | null; // latest timed taunt from the villain
   scoreAward?: number; // set on a terminal state to override the hub's default award
