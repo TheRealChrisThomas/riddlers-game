@@ -14,6 +14,7 @@ import { BatEmblem, HeroMascot, Riddler, RoleAvatar, VictoryBats, type HeroMood,
 import {
   BatcomputerState,
   ChamberResponse,
+  ChamberSide,
   ChamberState,
   ChamberType,
   DeathtrapData,
@@ -26,6 +27,7 @@ import {
   ROLES,
   ShellResponse,
   ShellState,
+  SwitchboardData,
   TraceEvent,
   VILLAIN_META,
   VILLAINS,
@@ -49,23 +51,41 @@ const send = (req: Promise<unknown>, report: (msg: string) => void) => {
   });
 };
 
-// Chamber-entry taunts, shown as a pop-up dialog. Riddler-specific: the other
-// three villains are locked, and when one opens it needs its own set (keyed by
-// villain), not a reuse of these.
-const RIDDLER_CHAMBER_TAUNTS: Record<ChamberType, string> = {
-  riddle:
-    "Riddle me this, Bat-Family… a four-digit truth, each digit one to six. Guess, and I'll tell you how close you dance to death.",
-  deathtrap:
-    'Cut my wires in order, in rhythm. One clumsy hand and the whole circuit surges back to life. Tick… tick… tick…',
-  escape:
-    'The vault answers only to my machine. Override it — if it lets you — then hold the exit together, or die apart. Ha ha ha!',
+// Client-side villain voice: the chamber-entry dialog, the gloat when the villain
+// wins, and the bitter concession when they lose. Keyed by villain, so opening a
+// sealed case file means writing its lines here rather than reusing another's.
+// (The timed taunts come from the workflow itself — see VILLAIN_VOICE in workflows.ts.)
+interface VillainVoiceUI {
+  chamber: Partial<Record<ChamberType, string>>;
+  defeat: string;
+  concede: string;
+}
+const VILLAIN_VOICE: Record<Villain, VillainVoiceUI> = {
+  riddler: {
+    chamber: {
+      riddle:
+        "Riddle me this, Bat-Family… a four-digit truth, each digit one to six. Guess, and I'll tell you how close you dance to death.",
+      deathtrap:
+        'Cut my wires in order, in rhythm. One clumsy hand and the whole circuit surges back to life. Tick… tick… tick…',
+      escape:
+        'The vault answers only to my machine. Override it — if it lets you — then hold the exit together, or die apart. Ha ha ha!',
+    },
+    defeat:
+      "Tick… tock… stopped. Riddle me this, Bat-Family: what's colder than my laughter? Your defeat. The trap wins, and I remain forever unsolved. HA HA HA!",
+    concede:
+      'No… NO! My perfect puzzle — solved?! Enjoy the night, Bat-Family. But every riddle you answer only makes the next one deadlier…',
+  },
+  twoface: {
+    chamber: {
+      switchboard:
+        'Two rooms, wired together. One of you sees the rules, the other sees the switches, and neither of you sees both. Talk fast — the coin already decided which room I like less.',
+    },
+    defeat: "Heads I win. Tails you lose. Funny how that works out, isn't it?",
+    concede: 'Both sides agreed for once. Enjoy it — that never happens twice.',
+  },
+  joker: { chamber: {}, defeat: '', concede: '' }, // sealed
+  penguin: { chamber: {}, defeat: '', concede: '' }, // sealed
 };
-
-const RIDDLER_DEFEAT =
-  "Tick… tock… stopped. Riddle me this, Bat-Family: what's colder than my laughter? Your defeat. The trap wins, and I remain forever unsolved. HA HA HA!";
-
-const RIDDLER_CONCEDE =
-  'No… NO! My perfect puzzle — solved?! Enjoy the night, Bat-Family. But every riddle you answer only makes the next one deadlier…';
 
 // --- API helpers ---
 class ApiError extends Error {
@@ -99,8 +119,9 @@ async function createCase(durationMinutes: number): Promise<string> {
 const joinCase = (code: string, operator: string) => post(`/api/cases/${code}/join`, { operator });
 const setRoleReq = (code: string, operator: string, role: Role) => post(`/api/cases/${code}/role`, { operator, role });
 const batSignalReq = (code: string, villain: Villain) => post(`/api/cases/${code}/batsignal`, { villain });
-const chamberAction = (code: string, operator: string, action: string, value?: unknown) =>
-  post(`/api/cases/${code}/chamber/action`, { operator, action, value });
+// `side` only matters in a mirrored wave (Two-Face); a single-chamber wave ignores it.
+const chamberAction = (code: string, operator: string, action: string, value?: unknown, side?: ChamberSide) =>
+  post(`/api/cases/${code}/chamber/action`, { operator, action, value, side });
 
 async function getHub(code: string): Promise<HubResponse | null> {
   const r = await fetch(`/api/cases/${code}/hub`);
@@ -114,8 +135,8 @@ async function getShell(code: string): Promise<ShellResponse | null> {
   if (!r.ok) return null;
   return (await r.json()) as ShellResponse;
 }
-async function getChamber(code: string): Promise<ChamberResponse | null> {
-  const r = await fetch(`/api/cases/${code}/chamber`);
+async function getChamber(code: string, side?: ChamberSide): Promise<ChamberResponse | null> {
+  const r = await fetch(`/api/cases/${code}/chamber${side ? `?side=${side}` : ''}`);
   if (!r.ok) return null;
   return (await r.json()) as ChamberResponse;
 }
@@ -265,27 +286,32 @@ function Case(props: { code: string; operator: string; villain: Villain; onBackT
     });
   };
 
-  // Pop the Riddler's dialog when a new chamber begins, or when he wins.
+  // Pop the villain's dialog when a new wave begins, or when they win.
   useEffect(() => {
     const s = shellResp?.shell;
     if (!s) return;
-    if (s.status === 'in_chamber' && s.chamberType) {
+    const voice = VILLAIN_VOICE[villain];
+    // Every chamber in a wave shares one intro — a mirrored wave is one room from
+    // two angles, so it gets one dialog, not two.
+    const waveType = s.chambers[0]?.type;
+    if (s.status === 'in_chamber' && waveType) {
       const key = `c${s.chamberIndex}`;
-      if (key !== shownDialog.current) {
+      const line = voice.chamber[waveType];
+      if (key !== shownDialog.current && line) {
         shownDialog.current = key;
-        setDialog(RIDDLER_CHAMBER_TAUNTS[s.chamberType]);
+        setDialog(line);
       }
     } else if (s.status === 'failed' && shownDialog.current !== 'defeat') {
       shownDialog.current = 'defeat';
-      setDialog(RIDDLER_DEFEAT);
+      setDialog(voice.defeat);
     } else if (s.status === 'escaped' && shownDialog.current !== 'concede') {
-      // he loses: mutter a bitter concession from the corner (bubble, not a blocking modal)
+      // they lose: mutter a bitter concession from the corner (bubble, not a blocking modal)
       shownDialog.current = 'concede';
-      setBubble(RIDDLER_CONCEDE);
+      setBubble(voice.concede);
       clearTimeout(bubbleTimer.current);
       bubbleTimer.current = window.setTimeout(() => setBubble(null), 12000);
     }
-  }, [shellResp?.shell?.status, shellResp?.shell?.chamberIndex, shellResp?.shell?.chamberType]);
+  }, [villain, shellResp?.shell?.status, shellResp?.shell?.chamberIndex, shellResp?.shell?.chambers[0]?.type]);
 
   // Timed taunts pushed by the workflow → speech bubble over the Riddler that auto-fades.
   useEffect(() => {
@@ -871,7 +897,8 @@ function ChamberHeader(props: { shell: ShellState; now: number }) {
           <span key={i} className={`step ${i < shell.chamberIndex ? 'done' : i === shell.chamberIndex ? 'active' : ''}`} />
         ))}
         <span className="progress-label">
-          Chamber {shell.chamberIndex + 1}/{shell.chamberTotal} — {shell.chamberTitle}
+          Chamber {shell.chamberIndex + 1}/{shell.chamberTotal} —{' '}
+          {shell.chambers.map((c) => c.title).join(' · ') || '—'}
         </span>
       </div>
       <div className={`clock ${danger ? 'danger' : ''}`}>{mm}:{ss}</div>
@@ -885,7 +912,19 @@ function Chamber(props: { code: string; operator: string; shell: ShellState; cha
   if (chamber.data.kind === 'riddle') return <RiddleChamber code={code} operator={operator} data={chamber.data} />;
   if (chamber.data.kind === 'deathtrap')
     return <DeathtrapChamber code={code} operator={operator} shell={shell} data={chamber.data} />;
-  return <EscapeChamber code={code} operator={operator} data={chamber.data} />;
+  if (chamber.data.kind === 'escape') return <EscapeChamber code={code} operator={operator} data={chamber.data} />;
+  return <SwitchboardChamber data={chamber.data} />;
+}
+
+// --- Two-Face's mirrored rooms: placeholder board until the case is built. ---
+function SwitchboardChamber(props: { data: SwitchboardData }) {
+  return (
+    <Centered>
+      <p className="tagline">
+        {props.data.side === 'law' ? "Harvey's Ledger" : 'The Scarred Switchboard'} is still sealed.
+      </p>
+    </Centered>
+  );
 }
 
 // --- Chamber 1: riddle / code cracker ---

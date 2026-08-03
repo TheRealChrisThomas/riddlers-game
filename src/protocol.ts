@@ -77,13 +77,48 @@ export const VILLAIN_META: Record<Villain, VillainMeta> = {
 // Per-villain progress tracked by the Bat-computer (grandparent workflow).
 export type VillainStatus = 'idle' | 'running' | 'escaped' | 'failed';
 
-// --- Chambers ---
-export type ChamberType = 'riddle' | 'deathtrap' | 'escape';
-export const CHAMBER_SEQUENCE: ChamberType[] = ['riddle', 'deathtrap', 'escape'];
+// ============================================================================
+// Chambers.
+//
+// A villain's adventure is a PLAN: an ordered list of *waves*, where every
+// chamber inside a wave runs at the same time. So the shape of a case — children
+// in sequence vs children in parallel — is data, not control flow:
+//
+//   riddler: [[riddle], [deathtrap], [escape]]   three waves of one → sequential
+//   twoface: [[law, chaos]]                      one wave of two    → parallel
+//
+// `side` only matters when a wave holds more than one chamber of the same type:
+// Two-Face's mirrored rooms are one chamber type seen from two sides.
+// ============================================================================
+export type ChamberType = 'riddle' | 'deathtrap' | 'escape' | 'switchboard';
+export type ChamberSide = 'law' | 'chaos';
+export const CHAMBER_SIDES: ChamberSide[] = ['law', 'chaos'];
+
+export interface ChamberSlot {
+  type: ChamberType;
+  side?: ChamberSide;
+}
+export type ChamberPlan = ChamberSlot[][]; // waves, in order; each wave runs concurrently
+
 export const CHAMBER_TITLES: Record<ChamberType, string> = {
   riddle: 'The Riddle Lock',
   deathtrap: 'The Deathtrap',
   escape: 'The Final Escape',
+  switchboard: 'The Mirrored Switchboard',
+};
+// A sided chamber is titled by its side — the two rooms are not the same room.
+export const CHAMBER_SIDE_TITLES: Record<ChamberSide, string> = {
+  law: "Harvey's Ledger",
+  chaos: 'The Scarred Switchboard',
+};
+export const chamberTitle = (slot: ChamberSlot): string =>
+  slot.side ? CHAMBER_SIDE_TITLES[slot.side] : CHAMBER_TITLES[slot.type];
+
+export const VILLAIN_CHAMBERS: Record<Villain, ChamberPlan> = {
+  riddler: [[{ type: 'riddle' }], [{ type: 'deathtrap' }], [{ type: 'escape' }]],
+  twoface: [[{ type: 'switchboard', side: 'law' }, { type: 'switchboard', side: 'chaos' }]],
+  joker: [], // sealed
+  penguin: [], // sealed
 };
 
 // ============================================================================
@@ -125,17 +160,26 @@ export interface BatcomputerArgs {
 // ============================================================================
 export type EscapeStatus = 'lobby' | 'in_chamber' | 'escaped' | 'failed';
 
+// One live chamber inside the current wave. A single-chamber wave (the Riddler)
+// has exactly one of these; Two-Face's mirrored wave has two.
+export interface ActiveChamber {
+  id: string; // workflowId of the running child chamber
+  type: ChamberType;
+  title: string;
+  side: ChamberSide | null;
+}
+
 export interface ShellState {
   status: EscapeStatus;
   caseCode: string;
+  villain: Villain; // which case this is, so the client doesn't need telling out of band
   deadlineEpochMs: number | null; // null until the escape actually starts
-  chamberIndex: number; // 0-based index of the active/next chamber
-  chamberTotal: number;
-  chamberType: ChamberType | null;
-  chamberTitle: string | null;
-  activeChamberId: string | null; // workflowId of the running child chamber
+  chamberIndex: number; // 0-based index of the active/next WAVE
+  chamberTotal: number; // number of waves in this villain's plan
+  chambers: ActiveChamber[]; // live chambers in the current wave (empty between waves)
   roster: Player[];
-  taunt: { id: number; text: string } | null; // latest timed taunt from the Riddler
+  taunt: { id: number; text: string } | null; // latest timed taunt from the villain
+  scoreAward?: number; // set on a terminal state to override the hub's default award
   log: string[];
 }
 
@@ -154,9 +198,13 @@ export interface EscapeArgs {
 // ============================================================================
 export interface ChamberArgs {
   type: ChamberType;
+  side?: ChamberSide; // set for sided chambers (Two-Face's mirrored rooms)
   caseCode: string;
   deadlineEpochMs: number; // shared absolute deadline across all chambers
   roster: Player[];
+  // The sibling sharing this wave, if any. Coupled chambers signal each other
+  // directly through an external workflow handle rather than via the parent.
+  peerWorkflowId?: string;
   reveal?: boolean; // dev only
 }
 
@@ -207,10 +255,20 @@ export interface EscapeData {
   operators: string[];
 }
 
-export type ChamberData = RiddleData | DeathtrapData | EscapeData;
+// Two-Face chamber — one side of the mirrored switchboard. Fleshed out with the
+// switch/constraint board when the case itself is built; this is the shape the
+// sealed placeholder answers with today.
+export interface SwitchboardData {
+  kind: 'switchboard';
+  side: ChamberSide;
+  solved: boolean;
+}
+
+export type ChamberData = RiddleData | DeathtrapData | EscapeData | SwitchboardData;
 
 export interface ChamberState {
   type: ChamberType;
+  side: ChamberSide | null;
   title: string;
   cleared: boolean;
   deadlineEpochMs: number;

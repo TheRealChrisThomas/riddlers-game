@@ -16,9 +16,10 @@ import {
   chamberActionSignal,
   getBatcomputerQuery,
   getChamberQuery,
+  getShellQuery,
   joinSignal,
 } from './shared';
-import { batcomputerWorkflow, chamberWorkflow } from './workflows';
+import { batcomputerWorkflow, chamberWorkflow, escapeWorkflow } from './workflows';
 
 // ============================================================================
 // These run against Temporal's time-skipping test server: when every workflow
@@ -301,6 +302,41 @@ describe('the Bat-computer (grandparent: score, Continue-As-New)', () => {
     expect(state.activeVillain).toBeNull();
     expect(state.statuses.joker).toBe('idle');
     await handle.terminate();
+  });
+
+  // The chamber plan is data (VILLAIN_CHAMBERS), so these two lock in the seam
+  // every future case file depends on: waves of one behave sequentially, and a
+  // villain with no plan must lose rather than escape for free.
+  it("exposes the Riddler's plan as three single-chamber waves", async () => {
+    const caseCode = uniqueId('PLAN').toUpperCase();
+    const handle = await env.client.workflow.start(escapeWorkflow, {
+      taskQueue: TASK_QUEUE,
+      workflowId: uniqueId('adv-plan'),
+      args: [{ villain: 'riddler', caseCode, durationMs: 60_000, seedRoster: SOLO, autoStart: true }],
+    });
+
+    const shell = await until(() => handle.query(getShellQuery), (s) => s.chambers.length > 0, 'the first wave');
+    expect(shell.villain).toBe('riddler');
+    expect(shell.chamberTotal).toBe(3);
+    expect(shell.chambers).toHaveLength(1); // one chamber per wave → sequential
+    expect(shell.chambers[0]).toMatchObject({
+      id: `${caseCode}#r1c1`, // unsuffixed: a solo wave keeps the original id shape
+      type: 'riddle',
+      title: 'The Riddle Lock',
+      side: null,
+    });
+    await handle.terminate();
+  });
+
+  it('fails a sealed case file instead of escaping for free', async () => {
+    const handle = await env.client.workflow.start(escapeWorkflow, {
+      taskQueue: TASK_QUEUE,
+      workflowId: uniqueId('adv-sealed'),
+      args: [{ villain: 'joker', caseCode: 'SEAL1', durationMs: 60_000, seedRoster: SOLO, autoStart: true }],
+    });
+    const result = await handle.result();
+    expect(result.status).toBe('failed');
+    expect(result.chambers).toEqual([]);
   });
 
   it('banks the score and Continue-As-News after a won case', async () => {
